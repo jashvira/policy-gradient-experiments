@@ -1,12 +1,11 @@
-# Policy Gradient Experiments
+# MATH Dataset Post-training
 
-Collection of policy gradient and reinforcement learning experiments for various domains.
+Post-training experiments on the MATH dataset (Hendrycks et al.) for mathematical reasoning.
 
-## Experiments
+## Coming Soon
 
-| Branch | Description | Domain |
-|--------|-------------|--------|
-| [gsm8k](../../tree/gsm8k) | Mathematical reasoning with GRPO | GSM8K dataset |
+This branch will contain post-training experiments on the MATH dataset.
 
+## Attribution
 
-Each experiment lives in its own branch with complete code, documentation, and results. The main branch serves as an index to all experiments.
+Experiments based on the MATH dataset from Hendrycks et al.
