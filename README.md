@@ -2,10 +2,8 @@
 
 Post-training experiments on the MATH dataset (Hendrycks et al.) for mathematical reasoning.
 
-## Contents
+## Experiments
 
-- `prompts/` - Stanford CS336 alignment prompt templates
-- `utils/` - Mathematical reasoning utilities (grader, vLLM inference)
 
 ## Attribution
 
