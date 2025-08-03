@@ -1,0 +1,8 @@
+GSM8K Test Set Evaluation
+Timestamp: 20250801_215114
+Model: /home/jash404/RL_experiments/gsm8k/outputs/Qwen-0.5B-GRPO-run2/checkpoint-700
+Batch Size: 512
+Accuracy: 0.0493
+Correct: 65/1319
+Eval Time: 66.57s
+Throughput: 19.81 problems/sec

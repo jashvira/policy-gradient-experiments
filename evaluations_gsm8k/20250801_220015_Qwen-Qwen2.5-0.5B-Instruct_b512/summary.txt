@@ -1,0 +1,8 @@
+GSM8K Test Set Evaluation
+Timestamp: 20250801_220015
+Model: Qwen/Qwen2.5-0.5B-Instruct
+Batch Size: 512
+Accuracy: 0.0000
+Correct: 0/1319
+Eval Time: 36.45s
+Throughput: 36.19 problems/sec

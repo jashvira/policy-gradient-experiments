@@ -1,0 +1,5 @@
+GSM8K Test Set Evaluation
+Model: base-model-compiled
+Accuracy: 0.0000
+Correct: 0/1319
+Eval Time: 258.77s

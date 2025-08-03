@@ -1,0 +1,10 @@
+{
+  "model_name": "Qwen/Qwen2.5-0.5B-Instruct",
+  "batch_size": 512,
+  "timestamp": "20250801_220015",
+  "accuracy": 0.0,
+  "correct": 0,
+  "total": 1319,
+  "eval_time": 36.448747634887695,
+  "throughput": 36.18780028363693
+}

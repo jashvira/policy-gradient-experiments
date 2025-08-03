@@ -6,7 +6,7 @@ checkpoints/
 *.pt
 
 # Evaluation results
-evaluations/
+evaluations_gsm8k/
 
 # Weights & Biases
 wandb/

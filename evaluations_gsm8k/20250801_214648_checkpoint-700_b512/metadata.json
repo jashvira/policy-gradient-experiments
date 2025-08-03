@@ -1,0 +1,10 @@
+{
+  "model_name": "/home/jash404/RL_experiments/gsm8k/outputs/Qwen-0.5B-GRPO-run2/checkpoint-700",
+  "batch_size": 512,
+  "timestamp": "20250801_214648",
+  "accuracy": 0.05307050796057619,
+  "correct": 70,
+  "total": 1319,
+  "eval_time": 7.086217164993286,
+  "throughput": 186.1359833164596
+}
