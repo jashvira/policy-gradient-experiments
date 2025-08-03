@@ -3,6 +3,10 @@
 vLLM utilities for MATH dataset inference.
 """
 
+import json
+import os
+from datetime import datetime
+from pathlib import Path
 from vllm import LLM, SamplingParams
 from typing import List, Dict, Any, Optional, Callable
 
@@ -45,10 +49,13 @@ def evaluate_vllm(
     reward_fn: Callable[[str, str], Dict[str, float]],
     prompts: List[str],
     ground_truths: List[str],
-    eval_sampling_params: SamplingParams
+    eval_sampling_params: SamplingParams,
+    output_dir: Optional[str] = None,
+    model_name: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Evaluate a language model on prompts and compute rewards.
+    Automatically saves results to disk with timestamp.
     """
     outputs = vllm_model.generate(prompts, eval_sampling_params)
     
@@ -61,10 +68,39 @@ def evaluate_vllm(
     format_rewards = [r.get('format_reward', 0.0) for r in rewards]
     total = len(rewards)
     
-    return {
+    results = {
         'responses': [output.outputs[0].text for output in outputs],
         'rewards': rewards,
         'total_samples': total,
         'answer_accuracy': sum(answer_rewards) / total,
         'format_accuracy': sum(format_rewards) / total,
+        'prompts': prompts,
+        'ground_truths': ground_truths,
+        'timestamp': datetime.now().isoformat(),
+        'model_name': model_name or 'unknown',
+        'sampling_params': {
+            'temperature': eval_sampling_params.temperature,
+            'top_p': eval_sampling_params.top_p,
+            'max_tokens': eval_sampling_params.max_tokens,
+            'stop': eval_sampling_params.stop
+        }
     }
+    
+    # Save results to disk
+    if output_dir is None:
+        output_dir = "evaluation_results"
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_prefix = model_name.replace("/", "_") if model_name else "model"
+    filename = f"{model_prefix}_eval_{timestamp}.json"
+    
+    filepath = output_path / filename
+    with open(filepath, 'w') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    
+    print(f"Evaluation results saved to: {filepath}")
+    
+    return results

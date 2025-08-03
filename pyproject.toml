@@ -14,6 +14,10 @@ dependencies = [
     "vllm>=0.10.0",
     "wandb>=0.21.0",
     "matplotlib>=3.10.3",
+    "latex2sympy2-extended",
+    "math-verify",
+    "pylatexenc",
+    "sympy",
 ]
 
 [project.optional-dependencies]
