@@ -45,3 +45,9 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+
+# Large dataset files
+*.zip
+*.tar.gz
+*.tar
+*.jsonl
