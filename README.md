@@ -5,7 +5,7 @@ Post-training experiments on the MATH dataset (Hendrycks et al.) for mathematica
 ## Contents
 
 - `prompts/` - Stanford CS336 alignment prompt templates
-- `drgrpo_grader.py` - Mathematical answer grading function with high recall
+- `utils/` - Mathematical reasoning utilities (grader, vLLM inference)
 
 ## Attribution
 
