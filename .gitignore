@@ -1,0 +1,19 @@
+# Model outputs and checkpoints
+outputs/
+checkpoints/
+*.safetensors
+*.pth
+*.pt
+
+# Evaluation results
+evaluations/
+
+# Weights & Biases
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
