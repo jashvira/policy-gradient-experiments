@@ -1,3 +1,28 @@
+# Test artifacts
+/tests/
+tests/_snapshots/
+tests/__pycache__/
+**/__pycache__/
+*.pytest_cache/
+.pytest_cache/
+
+# Logs and outputs
+logs/
+evaluation_results/
+wandb/
+model_checkpoints/
+
+# Python cache
+*.pyc
+*.pyo
+*.pyd
+*.DS_Store
+__pycache__/
+
+# Env
+.env
+.venv
+venv/
 # Python
 __pycache__/
 *.py[cod]
