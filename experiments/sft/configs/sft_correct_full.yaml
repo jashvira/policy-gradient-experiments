@@ -1,0 +1,6 @@
+sft_data_path: "/home/jash404/RL_experiments/MATH/sft_correct.jsonl"
+unique_train_examples: "all"
+val_every_steps: 4
+run_name: sft-correct-full
+save_at_end: true
+
