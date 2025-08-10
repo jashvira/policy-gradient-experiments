@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SFT training script with periodic vLLM validation and wandb logging.
-Loads hyperparameters from a JSON config file.
+Loads hyperparameters from a YAML config file.
 """
 
 import math
@@ -251,34 +251,20 @@ def save_model(model, tokenizer, output_dir: str = "./sft_output"):
 def main():
     parser = argparse.ArgumentParser(
         description="SFT training with periodic vLLM validation")
-    default_cfg_dir = (Path(__file__).parent / "configs").resolve()
     parser.add_argument("--config", type=str, default=None,
-                        help="Optional: path to JSON config file (overrides dir/name)")
-    parser.add_argument("--config-dir", type=str, default=str(default_cfg_dir),
-                        help="Directory containing config JSON files")
-    parser.add_argument("--config-name", type=str, default="base",
-                        help="Config filename without extension inside config-dir")
+                        help="Optional path to YAML config. If omitted, dataclass defaults are used.")
     parser.add_argument("--unique-train-examples", type=str, default=None,
                         help='Override unique_train_examples (int or "all")')
     args = parser.parse_args()
 
-    # Load config (file overrides dir/name) into dataclass
+    # Load config strictly from YAML if provided; otherwise use dataclass defaults
     if args.config:
         config_path = Path(args.config)
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        cfg = SFTTrainConfig.from_path(config_path)
     else:
-        # Prefer YAML if present, else JSON
-        yaml_path = Path(args.config_dir) / f"{args.config_name}.yaml"
-        yml_path = Path(args.config_dir) / f"{args.config_name}.yml"
-        json_path = Path(args.config_dir) / f"{args.config_name}.json"
-        if yaml_path.exists():
-            config_path = yaml_path
-        elif yml_path.exists():
-            config_path = yml_path
-        else:
-            config_path = json_path
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    cfg = SFTTrainConfig.from_path(config_path)
+        cfg = SFTTrainConfig()
     repo_root = Path(__file__).resolve().parents[2]
     cfg = cfg.resolve(repo_root=repo_root)
 

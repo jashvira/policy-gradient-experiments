@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Union
 
@@ -53,43 +52,29 @@ class SFTTrainConfig:
     model_name_for_vllm: Optional[str] = None  # defaults to model_name if None
 
     @classmethod
-    def _load_mapping(path: Path) -> dict:
-        """Load a dict from JSON or YAML based on file suffix."""
-        suffix = path.suffix.lower()
-        if suffix in {".yaml", ".yml"}:
-            try:
-                import yaml  # type: ignore
-            except Exception as e:
-                raise RuntimeError("PyYAML is required to load YAML configs. Please add pyyaml to dependencies.") from e
-            return yaml.safe_load(path.read_text()) or {}
-        else:
-            return json.loads(path.read_text())
-
-    @classmethod
     def from_path(cls, path: Union[str, Path]) -> "SFTTrainConfig":
-        """Load config (YAML or JSON) with simple inheritance via an 'extends' field.
+        """Load config strictly from a YAML file into the dataclass.
 
-        If the file contains {extends: base.yaml}, we load the base first (relative
-        to the current file), then overlay the child's keys.
+        - Only `.yaml`/`.yml` files are supported
+        - Unknown keys raise an error (to avoid silent typos)
+        - Missing keys fall back to dataclass defaults
         """
         path = Path(path)
-        data = cls._load_mapping(path)
+        suffix = path.suffix.lower()
+        if suffix not in {".yaml", ".yml"}:
+            raise ValueError(f"Only YAML config files are supported. Got: {path}")
 
-        parent_data: dict = {}
-        extends = data.get("extends") or data.get("$extends")
-        if extends:
-            parent_path = (path.parent / extends).resolve()
-            parent_data = cls._load_mapping(parent_path)
+        try:
+            import yaml  # type: ignore
+        except Exception as e:
+            raise RuntimeError("PyYAML is required to load YAML configs. Please add pyyaml to dependencies.") from e
 
-        merged = {**parent_data, **data}
-        merged.pop("extends", None)
-        merged.pop("$extends", None)
+        data = yaml.safe_load(path.read_text()) or {}
+        if not isinstance(data, dict):
+            raise ValueError("Config file must contain a YAML mapping at the top level.")
 
-        cfg = cls()
-        for key, value in merged.items():
-            if hasattr(cfg, key):
-                setattr(cfg, key, value)
-        return cfg
+        # Construct with kwargs to ensure unknown keys raise immediately
+        return cls(**data)
 
     def to_dict(self) -> dict:
         return asdict(self)
