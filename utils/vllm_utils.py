@@ -50,10 +50,21 @@ def init_vllm(
         return_value=None,
     )
 
+    # Select device by constraining visible GPUs; vLLM selects GPU 0 of the visible set
+    if device.startswith("cuda:"):
+        # Map 'cuda:N' to only expose that GPU
+        try:
+            gpu_index = device.split(":", 1)[1]
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_index
+        except Exception:
+            pass
+    elif device == "cpu":
+        # vLLM CPU is not generally supported; caller should have handled fallback
+        raise RuntimeError("vLLM does not support CPU inference in this configuration")
+
     with world_size_patch, profiling_patch:
         return LLM(
             model=model_id,
-            device=device,
             dtype=torch.bfloat16,
             enable_prefix_caching=True,
             gpu_memory_utilization=gpu_memory_utilization,
@@ -95,7 +106,8 @@ def evaluate_vllm(
     output_dir: Optional[str] = None,
     model_name: Optional[str] = None,
     problem_metadata: Optional[List[Dict]] = None,
-    save_full_responses: bool = False
+    save_full_responses: bool = False,
+    write_results: bool = True,
 ) -> Dict[str, Any]:
     """
     Evaluate a language model on prompts and compute rewards.
@@ -198,21 +210,22 @@ def evaluate_vllm(
         'results': problem_results
     }
 
-    # Save results to disk
-    if output_dir is None:
-        output_dir = "evaluation_results"
+    # Save results to disk (optional)
+    if write_results:
+        if output_dir is None:
+            output_dir = "evaluation_results"
 
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_prefix = model_name.replace("/", "_") if model_name else "model"
-    filename = f"{model_prefix}_eval_{timestamp}.json"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_prefix = model_name.replace("/", "_") if model_name else "model"
+        filename = f"{model_prefix}_eval_{timestamp}.json"
 
-    filepath = output_path / filename
-    with open(filepath, 'w') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        filepath = output_path / filename
+        with open(filepath, 'w') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
 
-    print(f"Evaluation results saved to: {filepath}")
+        print(f"Evaluation results saved to: {filepath}")
 
     return results
