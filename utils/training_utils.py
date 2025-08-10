@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from transformers import PreTrainedTokenizerBase
+from utils.vllm_utils import evaluate_vllm
 from typing import Callable, Dict, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
@@ -47,7 +48,12 @@ def masked_normalize(
     Returns:
         Normalized sum with masked-out elements excluded from the sum.
     """
-    return (tensor * mask).sum(dim=dim) / normalize_constant
+    masked = tensor * mask.to(dtype=tensor.dtype)
+    if dim is None:
+        masked_sum = masked.sum()
+    else:
+        masked_sum = masked.sum(dim=dim)
+    return masked_sum / normalize_constant
 
 
 def tokenize_prompt_and_output(
@@ -127,6 +133,9 @@ def get_response_log_probs(
     input_ids: torch.Tensor,
     labels: torch.Tensor,
     return_token_entropy: bool = False,
+    *,
+    requires_grad: bool = False,
+    attention_mask: Optional[torch.Tensor] = None,
 ) -> dict[str, torch.Tensor]:
     """Get per-token conditional log-probabilities and optional token entropy.
 
@@ -141,8 +150,10 @@ def get_response_log_probs(
             - "log_probs": Tensor (batch_size, sequence_length)
             - "token_entropy": optional Tensor (batch_size, sequence_length)
     """
-    with torch.no_grad():
-        logits = model(input_ids).logits  # (B, S, V)
+    # Enable/disable autograd depending on caller context
+    with torch.set_grad_enabled(requires_grad):
+        logits = model(
+            input_ids, attention_mask=attention_mask).logits  # (B, S, V)
 
     # Compute log-probs over vocabulary and gather per-position label log-prob
     log_probs_vocab = F.log_softmax(logits, dim=-1)  # (B, S, V)
@@ -156,6 +167,7 @@ def get_response_log_probs(
         result["token_entropy"] = compute_entropy(logits)
 
     return result
+
 
 def sft_microbatch_train_step(
     policy_log_probs: torch.Tensor,
@@ -178,7 +190,8 @@ def sft_microbatch_train_step(
     nll = -policy_log_probs
 
     # Sum over masked tokens across the whole microbatch using provided normalization
-    masked_sum = masked_normalize(nll, response_mask, normalize_constant=normalize_constant, dim=None)
+    masked_sum = masked_normalize(
+        nll, response_mask, normalize_constant=normalize_constant, dim=None)
 
     # Normalize by batch size and grad accumulation steps (normalize_constant already applied)
     batch_size = policy_log_probs.shape[0]
@@ -203,14 +216,10 @@ def log_generations(
     prompts: List[str],
     ground_truths: List[str],
     reward_fn: Callable[[str, str], Dict[str, float]],
-    max_new_tokens: int = 128,
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    is_correct_fn: Optional[Callable[[Dict[str, float]], bool]] = None,
-    # vLLM options
-    use_vllm: bool = False,
-    vllm_model: Optional[object] = None,
-    vllm_sampling_params: Optional[object] = None,
+    *,
+    # vLLM (required)
+    vllm_model: object,
+    vllm_sampling_params: object,
     # logging options
     output_dir: Optional[str] = None,
     model_name: Optional[str] = None,
@@ -242,47 +251,32 @@ def log_generations(
     model.eval()
     device = next(model.parameters()).device
 
-    # Generate with vLLM or HF
-    if use_vllm:
-        if vllm_model is None or vllm_sampling_params is None:
-            raise ValueError("use_vllm=True requires vllm_model and vllm_sampling_params")
-        vllm_outputs = vllm_model.generate(prompts, vllm_sampling_params)
-        responses: List[str] = [out.outputs[0].text for out in vllm_outputs]
-    else:
-        with torch.no_grad():
-            encoded = tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-            )
-            input_ids = encoded["input_ids"].to(device)
-            attention_mask = encoded.get("attention_mask", None)
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(device)
-
-            generated_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
-        # Decode responses (strip prompt tokens from the front)
-        prompt_lengths = (
-            encoded["input_ids"].ne(
-                tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-            ).sum(dim=1)
-        ).tolist()
-        responses = []
-        for idx, gen_ids in enumerate(generated_ids):
-            start = prompt_lengths[idx]
-            resp_ids = gen_ids[start:]
-            responses.append(tokenizer.decode(resp_ids, skip_special_tokens=True))
+    # Generate with vLLM (via evaluate_vllm) or HF
+    responses: List[str]
+    vllm_eval_payload: Optional[Dict[str, object]] = None
+    # Use the standardized vLLM evaluator to generate and persist results
+    vllm_eval_payload = evaluate_vllm(
+        vllm_model=vllm_model,
+        reward_fn=reward_fn,
+        prompts=prompts,
+        ground_truths=ground_truths,
+        eval_sampling_params=vllm_sampling_params,
+        output_dir=output_dir or "evaluation_results",
+        model_name=model_name or "unknown",
+        problem_metadata=None,
+        save_full_responses=True,
+        write_results=False,
+    )
+    # Extract generated texts back for entropy/length computation
+    results_list = vllm_eval_payload.get(
+        "results", [])  # type: ignore[assignment]
+    responses = [
+        (
+            (res.get("full_response") if isinstance(res, dict) else None)
+            or ""
+        )
+        for res in results_list  # type: ignore[union-attr]
+    ]
 
     # Compute token entropy over response tokens using utilities
     tokenization = tokenize_prompt_and_output(
@@ -308,25 +302,24 @@ def log_generations(
         token_entropy = compute_entropy(logits)
 
     # Per-example mean entropy over response tokens
-    mask_counts = response_mask.sum(dim=1).clamp_min(1)
-    response_entropy_mean = ((token_entropy * response_mask).sum(dim=1) / mask_counts).detach().cpu().tolist()
+    response_mask_f = response_mask.to(dtype=token_entropy.dtype)
+    mask_counts = response_mask_f.sum(dim=1).clamp_min(1)
+    response_entropy_mean = (
+        (token_entropy * response_mask_f).sum(dim=1) / mask_counts).detach().cpu().tolist()
 
     # Response lengths in tokens
     response_lengths = response_mask.sum(dim=1).detach().cpu().tolist()
 
-    # Rewards and correctness
+    # Rewards and correctness (reused from vLLM payload)
     example_dicts: List[Dict[str, object]] = []
-    correct_flags: List[bool] = []
-    for prompt, response, gt, resp_len, resp_ent in zip(
+    for idx, (prompt, response, gt, resp_len, resp_ent) in enumerate(zip(
         prompts, responses, ground_truths, response_lengths, response_entropy_mean
-    ):
-        rewards = reward_fn(response, gt)
-        if is_correct_fn is not None:
-            is_correct = bool(is_correct_fn(rewards))
-        else:
-            # Default heuristic: answer_reward > 0.5 is treated as correct
-            is_correct = bool(rewards.get("answer_reward", 0.0) > 0.5)
-        correct_flags.append(is_correct)
+    )):
+        # Reuse rewards/correctness from vLLM evaluation to avoid recomputation
+        vres = vllm_eval_payload["results"][idx]  # type: ignore[index]
+        rewards = vres.get("rewards", {}) if isinstance(vres, dict) else {}
+        is_correct = bool(vres.get("correct", False)
+                          ) if isinstance(vres, dict) else False
 
         example_dicts.append(
             {
@@ -342,49 +335,53 @@ def log_generations(
             }
         )
 
-    # Aggregates
-    import numpy as np  # local import to avoid hard dep elsewhere
-
-    lengths_np = np.array(response_lengths, dtype=float)
-    ent_np = np.array(response_entropy_mean, dtype=float)
-    correct_np = np.array(correct_flags, dtype=bool)
-
-    def safe_mean(arr: np.ndarray) -> float:
-        return float(arr.mean()) if arr.size > 0 else 0.0
-
-    avg_len = safe_mean(lengths_np)
-    avg_len_correct = safe_mean(lengths_np[correct_np]) if correct_np.any() else 0.0
-    avg_len_incorrect = safe_mean(lengths_np[~correct_np]) if (~correct_np).any() else 0.0
-    avg_entropy = safe_mean(ent_np)
-
+    # Aggregates (single-pass, no numpy)
+    total_len = 0.0
+    total_ent = 0.0
+    count = len(response_lengths)
+    for l, e in zip(response_lengths, response_entropy_mean):
+        total_len += float(l)
+        total_ent += float(e)
+    denom = max(1, count)
     aggregates = {
-        "avg_response_length": avg_len,
-        "avg_response_length_correct": avg_len_correct,
-        "avg_response_length_incorrect": avg_len_incorrect,
-        "avg_response_token_entropy": avg_entropy,
+        "avg_response_length": total_len / denom,
+        "avg_response_token_entropy": total_ent / denom,
     }
+
+    # If vLLM evaluation was used, surface its accuracy metrics too
+    if vllm_eval_payload is not None:
+        try:
+            # type: ignore[index]
+            overall = vllm_eval_payload["metadata"]["overall_metrics"]
+            aggregates.update({
+                "answer_accuracy": float(overall.get("answer_accuracy", 0.0)),
+                "format_accuracy": float(overall.get("format_accuracy", 0.0)),
+                "overall_accuracy": float(overall.get("overall_accuracy", 0.0)),
+            })
+        except Exception:
+            pass
 
     result = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
-            "generation_backend": "vllm" if use_vllm else "hf",
+            "generation_backend": "vllm",
             "model_name": model_name or "unknown",
             "num_examples": len(prompts),
             "sampling": {
-                "max_new_tokens": max_new_tokens if not use_vllm else getattr(vllm_sampling_params, "max_tokens", None),
-                "temperature": temperature if not use_vllm else getattr(vllm_sampling_params, "temperature", None),
-                "top_p": top_p if not use_vllm else getattr(vllm_sampling_params, "top_p", None),
+                "max_new_tokens": getattr(vllm_sampling_params, "max_tokens", None),
+                "temperature": getattr(vllm_sampling_params, "temperature", None),
+                "top_p": getattr(vllm_sampling_params, "top_p", None),
             },
         },
         "examples": example_dicts,
         "aggregates": aggregates,
     }
 
-    # Persist to file
+    # Persist merged SFT eval result once here (canonical SFT path)
     out_dir = Path(output_dir or "logs/generations")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    prefix = (model_name or ("vllm" if use_vllm else "hf")).replace("/", "_")
+    prefix = (model_name or "sft").replace("/", "_")
     out_path = out_dir / f"{prefix}_generations_{stamp}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False)

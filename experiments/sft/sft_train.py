@@ -4,7 +4,6 @@ SFT training script with periodic vLLM validation and wandb logging.
 Loads hyperparameters from a JSON config file.
 """
 
-import json
 import math
 import torch
 import wandb
@@ -14,12 +13,13 @@ from pathlib import Path
 from typing import Union
 from experiments.sft.config_schema import SFTTrainConfig
 from utils.vllm_utils import init_vllm, create_sampling_params, load_policy_into_vllm_instance
+from utils.math_data import load_math_validation, format_with_r1_zero_prompt
 from utils.training_utils import (
     tokenize_prompt_and_output,
     get_response_log_probs,
-    log_generations
+    log_generations,
+    sft_microbatch_train_step
 )
-from experiments.sft.sft_utils import sft_microbatch_train_step
 from utils.drgrpo_grader import r1_zero_reward_fn
 from utils.model_utils import setup_model_and_tokenizer
 from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
@@ -49,9 +49,6 @@ def create_data_loader(data, batch_size=4):
     return batches
 
 
-
-
-
 def train_model(
     model,
     tokenizer,
@@ -73,7 +70,6 @@ def train_model(
     adam_beta1: float,
     adam_beta2: float,
     adam_eps: float,
-    adam_fused: bool | None,
     warmup_steps: int,
     warmup_ratio: float | None,
     lr_scheduler: str,
@@ -81,6 +77,7 @@ def train_model(
     val_temperature: float,
     val_top_p: float,
     val_log_dir: str,
+    adam_fused: bool | None = None,
 ):
     """Train with grad accumulation, grad clipping, periodic vLLM validation, and wandb logging."""
     wandb.init(project=project, name=run_name, entity=wandb_entity)
@@ -101,11 +98,24 @@ def train_model(
     model.train()
     optimizer.zero_grad()
 
-    # Setup vLLM on configured eval device (no automatic CPU fallback)
-    llm = init_vllm(model_id=(model_name_for_vllm or run_name), device=eval_device, seed=seed, gpu_memory_utilization=vllm_gpu_mem_utilization)
+    # Setup vLLM on configured eval device (required)
+    if eval_device == "cpu":
+        raise RuntimeError(
+            "eval_device=cpu is not supported by vLLM. Please set a CUDA device, e.g., cuda:1")
+    if eval_device == device.type or (isinstance(device, torch.device) and eval_device == str(device)):
+        # Avoid trying to share the same device as training for vLLM
+        raise RuntimeError(
+            "vLLM eval on the same device as training is not supported. Use a different eval_device.")
+    llm = init_vllm(
+        model_id=(model_name_for_vllm or run_name),
+        device=eval_device,
+        seed=seed,
+        gpu_memory_utilization=vllm_gpu_mem_utilization,
+    )
 
     # Compute total optimizer steps for scheduling
-    total_update_steps = math.ceil(len(train_batches) / gradient_accumulation_steps)
+    total_update_steps = math.ceil(
+        len(train_batches) / gradient_accumulation_steps)
     if warmup_ratio is not None and warmup_steps == 0:
         warmup_steps = int(warmup_ratio * total_update_steps)
 
@@ -116,6 +126,52 @@ def train_model(
         warmup_ratio=warmup_ratio,
         after=lr_scheduler,
     )
+
+    # Logging helpers
+    def _log_train(loss_tensor: torch.Tensor) -> None:
+        wandb.log({
+            "train/loss": float(loss_tensor.item() * gradient_accumulation_steps),
+            "train/lr": float(optimizer.param_groups[0]["lr"]),
+            "train_step": train_step,
+        })
+
+    def _log_eval(result: dict) -> None:
+        payload = {
+            "eval/avg_response_length": result["aggregates"].get("avg_response_length", 0.0),
+            "eval/avg_response_token_entropy": result["aggregates"].get("avg_response_token_entropy", 0.0),
+            "eval_step": eval_step,
+        }
+        # If available (from vLLM path), include accuracy scalars
+        if "answer_accuracy" in result.get("aggregates", {}):
+            payload.update({
+                "eval/answer_accuracy": result["aggregates"]["answer_accuracy"],
+                "eval/format_accuracy": result["aggregates"]["format_accuracy"],
+                "eval/overall_accuracy": result["aggregates"]["overall_accuracy"],
+            })
+        wandb.log(payload)
+
+    # Helper to run validation via vLLM; returns result dict
+    def _run_validation() -> dict:
+        try:
+            load_policy_into_vllm_instance(model, llm)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load weights into vLLM for validation: {e}") from e
+
+        sampling = create_sampling_params(
+            temperature=val_temperature, top_p=val_top_p, max_tokens=max_new_tokens
+        )
+        return log_generations(
+            model=model,  # used for entropy/log-probs
+            tokenizer=tokenizer,
+            prompts=val_prompts,
+            ground_truths=val_answers,
+            reward_fn=r1_zero_reward_fn,
+            vllm_model=llm,
+            vllm_sampling_params=sampling,
+            output_dir=str(val_log_dir),
+            model_name=run_name,
+        )
 
     train_step = 0
     eval_step = 0
@@ -129,6 +185,9 @@ def train_model(
         input_ids = tokenized["input_ids"].to(device)
         labels = tokenized["labels"].to(device)
         response_mask = tokenized["response_mask"].to(device)
+        attention_mask = tokenized.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
 
         # Get per-token log-probabilities
         scores = get_response_log_probs(
@@ -136,6 +195,8 @@ def train_model(
             input_ids=input_ids,
             labels=labels,
             return_token_entropy=False,
+            requires_grad=True,
+            attention_mask=attention_mask,
         )
         policy_log_probs = scores["log_probs"]
 
@@ -149,40 +210,35 @@ def train_model(
 
         # Clip and step on accumulation boundary
         if (idx + 1) % gradient_accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=grad_clip)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
             train_step += 1
-            wandb.log({
-                "train/loss": float(loss.item() * gradient_accumulation_steps),
-                "train/lr": float(optimizer.param_groups[0]["lr"]),
-                "train_step": train_step,
-            })
+            _log_train(loss)
 
-            # Periodic validation using vLLM
+            # Periodic validation using vLLM (or HF fallback)
             if train_step % val_every_steps == 0:
-                # Load policy weights into vLLM inference instance
-                load_policy_into_vllm_instance(model, llm)
-                sampling = create_sampling_params(temperature=val_temperature, top_p=val_top_p, max_tokens=max_new_tokens)
-                result = log_generations(
-                    model=model,  # used for entropy/log-probs
-                    tokenizer=tokenizer,
-                    prompts=val_prompts,
-                    ground_truths=val_answers,
-                    reward_fn=r1_zero_reward_fn,
-                    use_vllm=True,
-                    vllm_model=llm,
-                    vllm_sampling_params=sampling,
-                    output_dir=str(val_log_dir),
-                    model_name=run_name,
-                )
+                result = _run_validation()
                 eval_step += 1
-                wandb.log({
-                    "eval/avg_response_length": result["aggregates"]["avg_response_length"],
-                    "eval/avg_response_token_entropy": result["aggregates"]["avg_response_token_entropy"],
-                    "eval_step": eval_step,
-                })
+                _log_eval(result)
+
+    # Finalize leftover gradients if the number of microbatches is not
+    # divisible by gradient_accumulation_steps. This ensures the last
+    # partial accumulation is not dropped.
+    remainder = len(train_batches) % gradient_accumulation_steps
+    if remainder != 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad()
+        train_step += 1
+        _log_train(loss)
+        if train_step % val_every_steps == 0:
+            result = _run_validation()
+            eval_step += 1
+            _log_eval(result)
 
 
 def save_model(model, tokenizer, output_dir: str = "./sft_output"):
@@ -193,12 +249,17 @@ def save_model(model, tokenizer, output_dir: str = "./sft_output"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SFT training with periodic vLLM validation")
+    parser = argparse.ArgumentParser(
+        description="SFT training with periodic vLLM validation")
     default_cfg_dir = (Path(__file__).parent / "configs").resolve()
-    parser.add_argument("--config", type=str, default=None, help="Optional: path to JSON config file (overrides dir/name)")
-    parser.add_argument("--config-dir", type=str, default=str(default_cfg_dir), help="Directory containing config JSON files")
-    parser.add_argument("--config-name", type=str, default="default", help="Config filename without .json inside config-dir")
-    parser.add_argument("--unique-train-examples", type=str, default=None, help='Override unique_train_examples (int or "all")')
+    parser.add_argument("--config", type=str, default=None,
+                        help="Optional: path to JSON config file (overrides dir/name)")
+    parser.add_argument("--config-dir", type=str, default=str(default_cfg_dir),
+                        help="Directory containing config JSON files")
+    parser.add_argument("--config-name", type=str, default="base",
+                        help="Config filename without extension inside config-dir")
+    parser.add_argument("--unique-train-examples", type=str, default=None,
+                        help='Override unique_train_examples (int or "all")')
     args = parser.parse_args()
 
     # Load config (file overrides dir/name) into dataclass
@@ -221,11 +282,12 @@ def main():
     repo_root = Path(__file__).resolve().parents[2]
     cfg = cfg.resolve(repo_root=repo_root)
 
-    # Load data (path from config or default to repo_root/MATH/sft.jsonl)
+    # Load SFT train data (path from config or default to repo_root/MATH/sft.jsonl)
     sft_data = load_sft_data(cfg.sft_data_path)
 
     # Setup model
-    model, tokenizer, device = setup_model_and_tokenizer(model_name=cfg.model_name, train_device=cfg.train_device)
+    model, tokenizer, device = setup_model_and_tokenizer(
+        model_name=cfg.model_name, train_device=cfg.train_device)
 
     # Optionally restrict number of unique training examples
     # Apply CLI override for unique_train_examples if provided
@@ -243,26 +305,12 @@ def main():
     batch_size = int(cfg.batch_size)
     batches = create_data_loader(sft_data, batch_size)
 
+    # Validation on canonical MATH validation set (r1_zero formatted)
     val_samples = int(cfg.val_samples)
-    val_prompts, val_answers = zip(*((ex["prompt"], ex["response"]) for ex in sft_data[:val_samples]))
-    val_prompts, val_answers = list(val_prompts), list(val_answers)
-
-    # Train with periodic eval and wandb
-    required_keys = [
-        "gradient_accumulation_steps",
-        "lr",
-        "val_every_steps",
-        "max_new_tokens",
-        "project",
-        "run_name",
-        "seed",
-        "grad_clip",
-        "vllm_gpu_mem_utilization",
-        "model_name_for_vllm",
-    ]
-    missing_keys = [k for k in required_keys if not hasattr(cfg, k)]
-    if missing_keys:
-        raise ValueError(f"Missing required config keys: {missing_keys}")
+    problems, answers, _ = load_math_validation()
+    problems = problems[:val_samples]
+    val_prompts = [format_with_r1_zero_prompt(p) for p in problems]
+    val_answers = answers[:val_samples]
 
     train_model(
         model=model,
@@ -286,7 +334,8 @@ def main():
         adam_beta2=float(cfg.adam_beta2),
         adam_eps=float(cfg.adam_eps),
         warmup_steps=int(cfg.warmup_steps),
-        warmup_ratio=float(cfg.warmup_ratio) if cfg.warmup_ratio is not None else None,
+        warmup_ratio=float(
+            cfg.warmup_ratio) if cfg.warmup_ratio is not None else None,
         lr_scheduler=str(cfg.lr_scheduler),
         eval_device=str(cfg.eval_device),
         val_temperature=float(cfg.val_temperature),
