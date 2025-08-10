@@ -11,6 +11,7 @@ class SFTTrainConfig:
     model_name: str = "Qwen/Qwen2.5-Math-1.5B-Instruct"
     sft_data_path: Optional[str] = None  # defaults to <repo_root>/MATH/sft.jsonl if None
     save_dir: str = "./sft_output"
+    save_at_end: bool = False
     val_log_dir: str = "logs/val_generations"
     train_device: str = "cuda:0"
     eval_device: str = "cuda:1"

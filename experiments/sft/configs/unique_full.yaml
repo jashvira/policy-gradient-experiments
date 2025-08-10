@@ -1,3 +1,4 @@
 unique_train_examples: "all"
 val_every_steps: 4
 run_name: sft-unique-full
+save_at_end: true

@@ -370,9 +370,10 @@ def main():
         num_epochs=int(getattr(cfg, "num_epochs", 1)),
     )
 
-    # Save
-    save_dir = str(cfg.save_dir)
-    save_model(model, tokenizer, output_dir=save_dir)
+    # Save (optional)
+    if bool(getattr(cfg, "save_at_end", False)):
+        save_dir = str(cfg.save_dir)
+        save_model(model, tokenizer, output_dir=save_dir)
 
 
 if __name__ == "__main__":
