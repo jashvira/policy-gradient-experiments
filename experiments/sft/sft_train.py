@@ -5,6 +5,7 @@ Loads hyperparameters from a YAML config file.
 """
 
 import math
+import os
 import torch
 import wandb
 import argparse
@@ -78,9 +79,20 @@ def train_model(
     val_top_p: float,
     val_log_dir: str,
     adam_fused: bool | None = None,
+    eval_before_training: bool = True,
+    num_epochs: int = 1,
 ):
     """Train with grad accumulation, grad clipping, periodic vLLM validation, and wandb logging."""
-    wandb.init(project=project, name=run_name, entity=wandb_entity)
+    # Resolve W&B settings and auto-login from environment if provided
+    resolved_project = os.environ.get("WANDB_PROJECT", project)
+    resolved_entity = wandb_entity or os.environ.get("WANDB_ENTITY")
+    api_key = os.environ.get("WANDB_API_KEY")
+    if api_key:
+        try:
+            wandb.login(key=api_key)
+        except Exception:
+            pass
+    wandb.init(project=resolved_project, name=run_name, entity=resolved_entity)
     wandb.define_metric("train_step")
     wandb.define_metric("eval_step")
     wandb.define_metric("train/*", step_metric="train_step")
@@ -113,9 +125,9 @@ def train_model(
         gpu_memory_utilization=vllm_gpu_mem_utilization,
     )
 
-    # Compute total optimizer steps for scheduling
-    total_update_steps = math.ceil(
-        len(train_batches) / gradient_accumulation_steps)
+    # Compute total optimizer steps for scheduling across all epochs
+    steps_per_epoch = math.ceil(len(train_batches) / gradient_accumulation_steps)
+    total_update_steps = steps_per_epoch * max(1, int(num_epochs))
     if warmup_ratio is not None and warmup_steps == 0:
         warmup_steps = int(warmup_ratio * total_update_steps)
 
@@ -140,6 +152,9 @@ def train_model(
             "eval/avg_response_length": result["aggregates"].get("avg_response_length", 0.0),
             "eval/avg_response_token_entropy": result["aggregates"].get("avg_response_token_entropy", 0.0),
             "eval_step": eval_step,
+            "eval/global_train_step": train_step,
+            "eval/epoch": (train_step / steps_per_epoch) if steps_per_epoch > 0 else 0.0,
+            "eval/num_samples": len(val_prompts),
         }
         # If available (from vLLM path), include accuracy scalars
         if "answer_accuracy" in result.get("aggregates", {}):
@@ -175,70 +190,90 @@ def train_model(
 
     train_step = 0
     eval_step = 0
-    for idx, batch in enumerate(train_batches):
-        # Tokenize with response mask
-        tokenized = tokenize_prompt_and_output(
-            prompt_strs=batch["prompts"],
-            output_strs=batch["responses"],
-            tokenizer=tokenizer,
-        )
-        input_ids = tokenized["input_ids"].to(device)
-        labels = tokenized["labels"].to(device)
-        response_mask = tokenized["response_mask"].to(device)
-        attention_mask = tokenized.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(device)
 
-        # Get per-token log-probabilities
-        scores = get_response_log_probs(
-            model=model,
-            input_ids=input_ids,
-            labels=labels,
-            return_token_entropy=False,
-            requires_grad=True,
-            attention_mask=attention_mask,
-        )
-        policy_log_probs = scores["log_probs"]
+    # Optional pre-training evaluation
+    if eval_before_training:
+        result = _run_validation()
+        eval_step += 1
+        _log_eval(result)
+    for epoch in range(int(max(1, num_epochs))):
+        for idx, batch in enumerate(train_batches):
+            # Tokenize with response mask
+            tokenized = tokenize_prompt_and_output(
+                prompt_strs=batch["prompts"],
+                output_strs=batch["responses"],
+                tokenizer=tokenizer,
+            )
+            input_ids = tokenized["input_ids"].to(device)
+            labels = tokenized["labels"].to(device)
+            response_mask = tokenized["response_mask"].to(device)
+            attention_mask = tokenized.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
 
-        # Compute masked SFT loss, handle grad accumulation, and backprop
-        loss, _ = sft_microbatch_train_step(
-            policy_log_probs=policy_log_probs,
-            response_mask=response_mask,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            normalize_constant=1.0,
-        )
+            # Get per-token log-probabilities
+            scores = get_response_log_probs(
+                model=model,
+                input_ids=input_ids,
+                labels=labels,
+                return_token_entropy=False,
+                requires_grad=True,
+                attention_mask=attention_mask,
+            )
+            policy_log_probs = scores["log_probs"]
 
-        # Clip and step on accumulation boundary
-        if (idx + 1) % gradient_accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=grad_clip)
+            # Compute masked SFT loss, handle grad accumulation, and backprop
+            loss, _ = sft_microbatch_train_step(
+                policy_log_probs=policy_log_probs,
+                response_mask=response_mask,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                normalize_constant=1.0,
+            )
+
+            # Clip and step on accumulation boundary
+            if (idx + 1) % gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=grad_clip)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                train_step += 1
+                _log_train(loss)
+
+                # Periodic validation using vLLM (or HF fallback)
+                if train_step % val_every_steps == 0:
+                    result = _run_validation()
+                    eval_step += 1
+                    _log_eval(result)
+
+        # Finalize leftover gradients if the number of microbatches is not
+        # divisible by gradient_accumulation_steps. This ensures the last
+        # partial accumulation is not dropped.
+        remainder = len(train_batches) % gradient_accumulation_steps
+        if remainder != 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
             train_step += 1
             _log_train(loss)
-
-            # Periodic validation using vLLM (or HF fallback)
             if train_step % val_every_steps == 0:
                 result = _run_validation()
                 eval_step += 1
                 _log_eval(result)
 
-    # Finalize leftover gradients if the number of microbatches is not
-    # divisible by gradient_accumulation_steps. This ensures the last
-    # partial accumulation is not dropped.
-    remainder = len(train_batches) % gradient_accumulation_steps
-    if remainder != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad()
-        train_step += 1
-        _log_train(loss)
-        if train_step % val_every_steps == 0:
-            result = _run_validation()
-            eval_step += 1
-            _log_eval(result)
+    # Always run a final validation and record summary metrics
+    try:
+        result = _run_validation()
+        eval_step += 1
+        _log_eval(result)
+        aggregates = result.get("aggregates", {})
+        if hasattr(wandb, "run") and wandb.run is not None:
+            wandb.run.summary["final/answer_accuracy"] = float(aggregates.get("answer_accuracy", 0.0))
+            wandb.run.summary["final/format_accuracy"] = float(aggregates.get("format_accuracy", 0.0))
+            wandb.run.summary["final/overall_accuracy"] = float(aggregates.get("overall_accuracy", 0.0))
+    except Exception:
+        pass
 
 
 def save_model(model, tokenizer, output_dir: str = "./sft_output"):
@@ -292,11 +327,15 @@ def main():
     batches = create_data_loader(sft_data, batch_size)
 
     # Validation on canonical MATH validation set (r1_zero formatted)
-    val_samples = int(cfg.val_samples)
     problems, answers, _ = load_math_validation()
-    problems = problems[:val_samples]
-    val_prompts = [format_with_r1_zero_prompt(p) for p in problems]
-    val_answers = answers[:val_samples]
+    if isinstance(cfg.val_samples, int):
+        selected_problems = problems[: int(cfg.val_samples)]
+        selected_answers = answers[: int(cfg.val_samples)]
+    else:
+        selected_problems = problems
+        selected_answers = answers
+    val_prompts = [format_with_r1_zero_prompt(p) for p in selected_problems]
+    val_answers = selected_answers
 
     train_model(
         model=model,
@@ -327,6 +366,8 @@ def main():
         val_temperature=float(cfg.val_temperature),
         val_top_p=float(cfg.val_top_p),
         val_log_dir=str(cfg.val_log_dir),
+        eval_before_training=bool(cfg.eval_before_training),
+        num_epochs=int(getattr(cfg, "num_epochs", 1)),
     )
 
     # Save

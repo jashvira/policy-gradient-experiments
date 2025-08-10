@@ -16,12 +16,13 @@ class SFTTrainConfig:
     eval_device: str = "cuda:1"
 
     # Batching and sampling
-    batch_size: int = 4
-    val_samples: int = 32
+    batch_size: int = 64
+    val_samples: Union[int, str] = "all"
     unique_train_examples: Union[int, str] = "all"  # int or "all"
+    num_epochs: int = 10
 
     # Optimization
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 8
     lr: float = 5e-5
     weight_decay: float = 0.0
     adam_beta1: float = 0.9
@@ -32,14 +33,15 @@ class SFTTrainConfig:
 
     # Scheduler
     warmup_steps: int = 0
-    warmup_ratio: Optional[float] = None
-    lr_scheduler: str = "linear"  # or "cosine"
+    warmup_ratio: Optional[float] = 0.03
+    lr_scheduler: str = "cosine"  # or "linear"
 
     # Evaluation/generation
     val_every_steps: int = 100
-    max_new_tokens: int = 128
-    val_temperature: float = 0.7
+    max_new_tokens: int = 1024
+    val_temperature: float = 0.0
     val_top_p: float = 0.95
+    eval_before_training: bool = True
 
     # Logging
     project: str = "sft-math"

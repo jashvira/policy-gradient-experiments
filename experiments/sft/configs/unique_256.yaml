@@ -1,2 +1,3 @@
-extends: base.yaml
 unique_train_examples: 256
+val_every_steps: 1
+run_name: sft-unique-256
