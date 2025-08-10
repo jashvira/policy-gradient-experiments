@@ -6,6 +6,9 @@ This script evaluates a language model's zero-shot performance on the MATH datas
 using the r1_zero prompt format for mathematical reasoning.
 """
 
+from utils.drgrpo_grader import r1_zero_reward_fn
+from utils.math_data import load_math_validation, format_with_r1_zero_prompt
+from utils.vllm_utils import load_vllm_model, create_sampling_params, evaluate_vllm
 import json
 import argparse
 from pathlib import Path
@@ -16,62 +19,16 @@ import os
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from utils.vllm_utils import load_vllm_model, create_sampling_params, evaluate_vllm
-from utils.drgrpo_grader import r1_zero_reward_fn
-
-
-def load_math_validation() -> Tuple[List[str], List[str], List[Dict]]:
-    """
-    Load MATH validation dataset from MATH/validation.jsonl
-
-    Returns:
-        Tuple of (problems, ground_truths, metadata) lists
-    """
-    validation_path = Path(__file__).parent.parent / "MATH" / "validation.jsonl"
-
-    problems = []
-    answers = []
-    metadata = []
-
-    with open(validation_path, 'r') as f:
-        for line in f:
-            data = json.loads(line.strip())
-            problems.append(data['problem'])
-            answers.append(data['answer'])
-            metadata.append({
-                'problem': data['problem'],
-                'subject': data['subject'],
-                'level': data['level'],
-                'unique_id': data['unique_id']
-            })
-
-    print(f"Loaded {len(problems)} validation problems")
-    return problems, answers, metadata
-
-
-def format_with_r1_zero_prompt(problem: str) -> str:
-    """
-    Format problem with r1_zero prompt template
-
-    Args:
-        problem: The mathematical problem to solve
-
-    Returns:
-        Formatted prompt string
-    """
-    prompt_path = Path(__file__).parent.parent / "prompts" / "r1_zero.prompt"
-
-    with open(prompt_path, 'r') as f:
-        template = f.read()
-
-    return template.format(question=problem)
-
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Qwen 2.5 Math 1.5B on MATH dataset")
-    parser.add_argument("--model_path", required=True, help="Path to Qwen2.5-Math-1.5B model")
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size for evaluation")
-    parser.add_argument("--output_dir", default="evaluation_results", help="Output directory for results")
+    parser = argparse.ArgumentParser(
+        description="Evaluate Qwen 2.5 Math 1.5B on MATH dataset")
+    parser.add_argument("--model_path", required=True,
+                        help="Path to Qwen2.5-Math-1.5B model")
+    parser.add_argument("--batch_size", type=int, default=256,
+                        help="Batch size for evaluation")
+    parser.add_argument("--output_dir", default="evaluation_results",
+                        help="Output directory for results")
 
     args = parser.parse_args()
 
@@ -109,13 +66,17 @@ def main():
     print("EVALUATION RESULTS")
     print("="*50)
     print(f"Total samples: {results['metadata']['total_samples']}")
-    print(f"Answer accuracy: {results['metadata']['overall_metrics']['answer_accuracy']:.4f}")
-    print(f"Format accuracy: {results['metadata']['overall_metrics']['format_accuracy']:.4f}")
-    print(f"Overall accuracy: {results['metadata']['overall_metrics']['overall_accuracy']:.4f}")
+    print(
+        f"Answer accuracy: {results['metadata']['overall_metrics']['answer_accuracy']:.4f}")
+    print(
+        f"Format accuracy: {results['metadata']['overall_metrics']['format_accuracy']:.4f}")
+    print(
+        f"Overall accuracy: {results['metadata']['overall_metrics']['overall_accuracy']:.4f}")
     print("\nSUBJECT BREAKDOWN:")
     print("-" * 30)
     for subject, stats in results['subject_breakdown'].items():
-        print(f"{subject:20} {stats['correct']:3d}/{stats['total']:3d} ({stats['accuracy']:.3f})")
+        print(
+            f"{subject:20} {stats['correct']:3d}/{stats['total']:3d} ({stats['accuracy']:.3f})")
     print("="*50)
 
 
