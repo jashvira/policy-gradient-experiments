@@ -110,11 +110,16 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
     """
     state_dict = policy.state_dict()
 
-    # Try several known internal paths to reach the model
+    # Try several known internal paths to reach the model, from newer to older
     candidate_attrs = [
+        # For vLLM >= 0.4.x with workers
+        ("llm_engine", "model_executor", "workers", 0, "model_runner", "model"),
+        # Older vLLM paths
         ("llm_engine", "model_executor", "driver_worker", "model_runner", "model"),
         ("llm_engine", "model_executor", "driver_worker", "model_runner", "driver_model"),
         ("llm_engine", "model_executor", "driver_worker", "model"),
+        # Fallback for very simple/direct structures
+        ("model",),
     ]
 
     llm_model = None
@@ -122,9 +127,15 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
         node = llm
         ok = True
         for attr in path:
-            if hasattr(node, attr):
-                node = getattr(node, attr)
-            else:
+            try:
+                if isinstance(attr, str):
+                    node = getattr(node, attr)
+                elif isinstance(attr, int):
+                    node = node[attr]
+                else:
+                    ok = False
+                    break
+            except (AttributeError, IndexError, TypeError, KeyError):
                 ok = False
                 break
         if ok:
@@ -135,8 +146,10 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
         raise RuntimeError("Could not locate vLLM internal model to load weights into.")
 
     if hasattr(llm_model, "load_weights"):
+        # vLLM's preferred API
         llm_model.load_weights(state_dict.items())
     elif hasattr(llm_model, "load_state_dict"):
+        # Standard PyTorch fallback
         llm_model.load_state_dict(state_dict)
     else:
         raise RuntimeError("vLLM internal model does not support weight loading.")
