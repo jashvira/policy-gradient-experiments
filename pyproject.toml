@@ -18,6 +18,7 @@ dependencies = [
     "math-verify",
     "pylatexenc",
     "sympy",
+    "PyYAML>=6.0.2",
     "pytest>=8.4.1",
 ]
 

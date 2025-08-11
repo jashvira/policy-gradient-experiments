@@ -6,6 +6,14 @@ This script evaluates a language model's zero-shot performance on the MATH datas
 using the r1_zero prompt format for mathematical reasoning.
 """
 
+import sys
+from pathlib import Path
+
+# Ensure repository root is on sys.path for absolute imports like `utils.*` and `experiments.*`
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from utils.drgrpo_grader import r1_zero_reward_fn
 from utils.math_data import load_math_validation, format_with_r1_zero_prompt
 from utils.vllm_utils import load_vllm_model, create_sampling_params, evaluate_vllm
@@ -13,11 +21,7 @@ import json
 import argparse
 from pathlib import Path
 from typing import List, Tuple, Dict
-import sys
 import os
-
-# Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
 
 
 def main():
