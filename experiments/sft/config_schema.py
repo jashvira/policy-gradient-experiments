@@ -34,7 +34,7 @@ class SFTTrainConfig:
 
     # Scheduler
     warmup_steps: int = 0
-    warmup_ratio: Optional[float] = 0.03
+    warmup_ratio: Optional[float] = 0.0
     lr_scheduler: str = "cosine"  # or "linear"
 
     # Evaluation/generation
@@ -42,7 +42,7 @@ class SFTTrainConfig:
     max_new_tokens: int = 1024
     val_temperature: float = 0.0
     val_top_p: float = 1.0
-    eval_before_training: bool = True
+    eval_before_training: bool = False
 
     # Logging
     project: str = "sft-math"
