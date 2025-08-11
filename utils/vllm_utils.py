@@ -5,14 +5,18 @@ vLLM utilities for MATH dataset inference.
 
 import json
 import os
+import importlib
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from vllm import LLM, SamplingParams
-from vllm.model_executor import set_random_seed as vllm_set_random_seed
-from typing import List, Dict, Any, Optional, Callable
-from unittest.mock import patch
+from typing import List, Dict, Any, Optional, Callable, Union
+
 import torch
 from transformers import PreTrainedModel
+from unittest.mock import patch
+from vllm import LLM, SamplingParams
+from vllm.model_executor import set_random_seed as vllm_set_random_seed
+
 from utils.drgrpo_grader import extract_answer
 
 
@@ -27,6 +31,9 @@ def load_vllm_model(model_path: str, **kwargs) -> LLM:
     - max_num_batched_tokens: Tokens per forward pass (default 512)
     - trust_remote_code: Allow custom model code (some models require this)
     """
+    # Default to safer settings across vLLM versions
+    kwargs.setdefault("trust_remote_code", True)
+    kwargs.setdefault("dtype", "auto")
     return LLM(model=model_path, **kwargs)
 
 
@@ -35,6 +42,9 @@ def init_vllm(
     device: str,
     seed: int,
     gpu_memory_utilization: float = 0.85,
+    *,
+    dtype: Union[str, torch.dtype, None] = "auto",
+    trust_remote_code: bool = True,
 ) -> LLM:
     """Initialize a vLLM instance on a specific device with patches for single-GPU usage.
 
@@ -45,10 +55,19 @@ def init_vllm(
 
     # Monkeypatch per TRL to ensure single-process behavior and avoid profiling checks
     world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
-    profiling_patch = patch(
-        "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
-        return_value=None,
-    )
+    # Make the profiling patch resilient across vLLM versions
+    profiling_patch = nullcontext()
+    try:
+        worker_mod = importlib.import_module("vllm.worker.worker")
+        if hasattr(worker_mod, "Worker") and hasattr(
+            worker_mod.Worker, "_assert_memory_footprint_increased_during_profiling"
+        ):
+            profiling_patch = patch(
+                "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
+                return_value=None,
+            )
+    except Exception:
+        profiling_patch = nullcontext()
 
     # Select device by constraining visible GPUs; vLLM selects GPU 0 of the visible set
     if device.startswith("cuda:"):
@@ -63,22 +82,64 @@ def init_vllm(
         raise RuntimeError("vLLM does not support CPU inference in this configuration")
 
     with world_size_patch, profiling_patch:
-        return LLM(
-            model=model_id,
-            dtype=torch.bfloat16,
-            enable_prefix_caching=True,
-            gpu_memory_utilization=gpu_memory_utilization,
-        )
+        llm_kwargs: Dict[str, Any] = {
+            "model": model_id,
+            "enable_prefix_caching": True,
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "trust_remote_code": trust_remote_code,
+        }
+        if isinstance(dtype, torch.dtype):
+            # vLLM accepts strings like "bfloat16"; map common torch dtypes
+            dtype_map = {
+                torch.float16: "float16",
+                torch.half: "float16",
+                torch.bfloat16: "bfloat16",
+                torch.float32: "float32",
+            }
+            llm_kwargs["dtype"] = dtype_map.get(dtype, "auto")
+        elif dtype is not None:
+            llm_kwargs["dtype"] = dtype
+        return LLM(**llm_kwargs)
 
 
 def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
     """Load HF policy weights into an existing vLLM LLM instance.
 
-    Mirrors TRL's approach of pushing a policy state_dict into vLLM's model runner.
+    Attempts to locate the underlying model object across vLLM versions and
+    load weights. Falls back to .load_state_dict if .load_weights is absent.
     """
     state_dict = policy.state_dict()
-    llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    llm_model.load_weights(state_dict.items())
+
+    # Try several known internal paths to reach the model
+    candidate_attrs = [
+        ("llm_engine", "model_executor", "driver_worker", "model_runner", "model"),
+        ("llm_engine", "model_executor", "driver_worker", "model_runner", "driver_model"),
+        ("llm_engine", "model_executor", "driver_worker", "model"),
+    ]
+
+    llm_model = None
+    for path in candidate_attrs:
+        node = llm
+        ok = True
+        for attr in path:
+            if hasattr(node, attr):
+                node = getattr(node, attr)
+            else:
+                ok = False
+                break
+        if ok:
+            llm_model = node
+            break
+
+    if llm_model is None:
+        raise RuntimeError("Could not locate vLLM internal model to load weights into.")
+
+    if hasattr(llm_model, "load_weights"):
+        llm_model.load_weights(state_dict.items())
+    elif hasattr(llm_model, "load_state_dict"):
+        llm_model.load_state_dict(state_dict)
+    else:
+        raise RuntimeError("vLLM internal model does not support weight loading.")
 
 
 def create_sampling_params(
