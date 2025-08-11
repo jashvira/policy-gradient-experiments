@@ -46,6 +46,8 @@ checkpoints/
 *.safetensors
 *.pth
 *.pt
+*.model
+.models/
 
 # Training artifacts
 wandb/
