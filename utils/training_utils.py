@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from transformers import PreTrainedTokenizerBase
-from utils.vllm_utils import evaluate_vllm
+# Intentionally avoid importing vLLM here to keep training logging HF-only
 from typing import Callable, Dict, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
@@ -217,68 +217,52 @@ def log_generations(
     ground_truths: List[str],
     reward_fn: Callable[[str, str], Dict[str, float]],
     *,
-    # vLLM (required)
-    vllm_model: object,
-    vllm_sampling_params: object,
-    # logging options
+    max_new_tokens: int = 64,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
     output_dir: Optional[str] = None,
     model_name: Optional[str] = None,
+    write_results: bool = False,
 ) -> Dict[str, object]:
-    """Generate responses for prompts and compute logging metrics.
+    """HF-only generation and logging helper for training batches.
 
-    Logs per-example fields and aggregate statistics:
-      - prompt, response, ground_truth
-      - reward dict (including format_reward, answer_reward, reward)
-      - mean token entropy over response tokens
-      - response length in tokens
-      - aggregates: avg token entropy, avg length, avg length for correct/incorrect
-
-    Args:
-        model: Language model to generate with (already on correct device).
-        tokenizer: Tokenizer paired with the model.
-        prompts: List of prompt strings.
-        ground_truths: List of corresponding ground-truth answers.
-        reward_fn: Callable that returns a dict with keys like
-            {"reward", "format_reward", "answer_reward"} given (response, ground_truth).
-        max_new_tokens: Maximum tokens to generate per prompt.
-        temperature: Sampling temperature.
-        top_p: nucleus sampling parameter.
-        is_correct_fn: Optional function mapping reward dict -> bool for correctness.
-
-    Returns:
-        Dict with keys "examples" (list of per-example dicts) and "aggregates" (metrics).
+    Generates with the HF model, computes response entropy/length, evaluates rewards,
+    and returns a dict with examples and aggregates. Optionally writes a JSON artifact.
     """
-    model.eval()
     device = next(model.parameters()).device
+    was_training = model.training
+    model.eval()
 
-    # Generate with vLLM (via evaluate_vllm) or HF
-    responses: List[str]
-    vllm_eval_payload: Optional[Dict[str, object]] = None
-    # Use the standardized vLLM evaluator to generate and persist results
-    vllm_eval_payload = evaluate_vllm(
-        vllm_model=vllm_model,
-        reward_fn=reward_fn,
-        prompts=prompts,
-        ground_truths=ground_truths,
-        eval_sampling_params=vllm_sampling_params,
-        output_dir=output_dir or "evaluation_results",
-        model_name=model_name or "unknown",
-        problem_metadata=None,
-        save_full_responses=True,
-        write_results=False,
-    )
-    # Extract generated texts back for entropy/length computation
-    results_list = vllm_eval_payload.get(
-        "results", [])  # type: ignore[assignment]
-    responses = [
-        (
-            (res.get("full_response") if isinstance(res, dict) else None)
-            or ""
+    # HF generation
+    pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
+    eos_id = tokenizer.eos_token_id
+    with torch.no_grad():
+        enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
+        input_ids = enc["input_ids"].to(device)
+        attn_mask = enc.get("attention_mask")
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(device)
+        gen_ids = model.generate(
+            input_ids=input_ids,
+            attention_mask=attn_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=bool(temperature and temperature > 0),
+            temperature=temperature,
+            top_p=top_p,
+            pad_token_id=pad_id,
+            eos_token_id=eos_id,
         )
-        for res in results_list  # type: ignore[union-attr]
-    ]
+    # Determine prompt lengths
+    if attn_mask is not None:
+        prompt_lens = attn_mask.sum(dim=1).tolist()
+    else:
+        prompt_lens = (input_ids != pad_id).sum(dim=1).tolist()
+    responses: List[str] = []
+    for i in range(len(prompts)):
+        gen_part = gen_ids[i, prompt_lens[i]:]
+        responses.append(tokenizer.decode(gen_part, skip_special_tokens=True))
 
-    # Compute token entropy over response tokens using utilities
+    # Token entropy and response length
     tokenization = tokenize_prompt_and_output(
         prompt_strs=prompts,
         output_strs=responses,
@@ -287,7 +271,6 @@ def log_generations(
     concat_input_ids = tokenization["input_ids"].to(device)
     concat_labels = tokenization["labels"].to(device)
     response_mask = tokenization["response_mask"].to(device)
-
     with torch.no_grad():
         scoring = get_response_log_probs(
             model=model,
@@ -295,95 +278,77 @@ def log_generations(
             labels=concat_labels,
             return_token_entropy=True,
         )
-    token_entropy = scoring.get("token_entropy")  # (B, S)
+    token_entropy = scoring.get("token_entropy")
     if token_entropy is None:
-        # Fallback compute from logits if needed (should not happen)
         logits = model(concat_input_ids).logits
         token_entropy = compute_entropy(logits)
-
-    # Per-example mean entropy over response tokens
     response_mask_f = response_mask.to(dtype=token_entropy.dtype)
     mask_counts = response_mask_f.sum(dim=1).clamp_min(1)
     response_entropy_mean = (
-        (token_entropy * response_mask_f).sum(dim=1) / mask_counts).detach().cpu().tolist()
-
-    # Response lengths in tokens
+        (token_entropy * response_mask_f).sum(dim=1) / mask_counts
+    ).detach().cpu().tolist()
     response_lengths = response_mask.sum(dim=1).detach().cpu().tolist()
 
-    # Rewards and correctness (reused from vLLM payload)
+    # Rewards and aggregates
     example_dicts: List[Dict[str, object]] = []
-    for idx, (prompt, response, gt, resp_len, resp_ent) in enumerate(zip(
+    n_format_correct = 0
+    n_answer_correct = 0
+    n_correct = 0
+    for prompt, response, gt, resp_len, resp_ent in zip(
         prompts, responses, ground_truths, response_lengths, response_entropy_mean
-    )):
-        # Reuse rewards/correctness from vLLM evaluation to avoid recomputation
-        vres = vllm_eval_payload["results"][idx]  # type: ignore[index]
-        rewards = vres.get("rewards", {}) if isinstance(vres, dict) else {}
-        is_correct = bool(vres.get("correct", False)
-                          ) if isinstance(vres, dict) else False
+    ):
+        rewards = reward_fn(response, gt)
+        is_correct = bool(rewards.get("reward", 0.0))
+        n_format_correct += int(bool(rewards.get("format_reward", 0.0)))
+        n_answer_correct += int(bool(rewards.get("answer_reward", 0.0)))
+        n_correct += int(is_correct)
+        example_dicts.append({
+            "prompt": prompt,
+            "response": response,
+            "ground_truth": gt,
+            "reward": rewards.get("reward"),
+            "format_reward": rewards.get("format_reward"),
+            "answer_reward": rewards.get("answer_reward"),
+            "response_token_entropy_mean": resp_ent,
+            "response_length_tokens": int(resp_len),
+            "is_correct": is_correct,
+        })
 
-        example_dicts.append(
-            {
-                "prompt": prompt,
-                "response": response,
-                "ground_truth": gt,
-                "reward": rewards.get("reward"),
-                "format_reward": rewards.get("format_reward"),
-                "answer_reward": rewards.get("answer_reward"),
-                "response_token_entropy_mean": resp_ent,
-                "response_length_tokens": int(resp_len),
-                "is_correct": is_correct,
-            }
-        )
-
-    # Aggregates (single-pass, no numpy)
-    total_len = 0.0
-    total_ent = 0.0
-    count = len(response_lengths)
-    for l, e in zip(response_lengths, response_entropy_mean):
-        total_len += float(l)
-        total_ent += float(e)
-    denom = max(1, count)
+    denom = max(1, len(response_lengths))
     aggregates = {
-        "avg_response_length": total_len / denom,
-        "avg_response_token_entropy": total_ent / denom,
+        "avg_response_length": float(sum(response_lengths)) / denom,
+        "avg_response_token_entropy": float(sum(response_entropy_mean)) / denom,
+        "answer_accuracy": n_answer_correct / denom,
+        "format_accuracy": n_format_correct / denom,
+        "overall_accuracy": n_correct / denom,
     }
-
-    # If vLLM evaluation was used, surface its accuracy metrics too
-    if vllm_eval_payload is not None:
-        try:
-            # type: ignore[index]
-            overall = vllm_eval_payload["metadata"]["overall_metrics"]
-            aggregates.update({
-                "answer_accuracy": float(overall.get("answer_accuracy", 0.0)),
-                "format_accuracy": float(overall.get("format_accuracy", 0.0)),
-                "overall_accuracy": float(overall.get("overall_accuracy", 0.0)),
-            })
-        except Exception:
-            pass
 
     result = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
-            "generation_backend": "vllm",
+            "generation_backend": "hf",
             "model_name": model_name or "unknown",
             "num_examples": len(prompts),
             "sampling": {
-                "max_new_tokens": getattr(vllm_sampling_params, "max_tokens", None),
-                "temperature": getattr(vllm_sampling_params, "temperature", None),
-                "top_p": getattr(vllm_sampling_params, "top_p", None),
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
             },
         },
         "examples": example_dicts,
         "aggregates": aggregates,
     }
 
-    # Persist merged SFT eval result once here (canonical SFT path)
-    out_dir = Path(output_dir or "logs/generations")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    prefix = (model_name or "sft").replace("/", "_")
-    out_path = out_dir / f"{prefix}_generations_{stamp}.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+    if write_results:
+        out_dir = Path(output_dir or "logs/generations")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        prefix = (model_name or "sft").replace("/", "_")
+        out_path = out_dir / f"{prefix}_generations_{stamp}.json"
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
+    if was_training:
+        model.train()
 
     return result
