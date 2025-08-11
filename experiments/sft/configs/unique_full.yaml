@@ -1,3 +1,7 @@
 unique_train_examples: "all"
 run_name: sft-unique-full
+model_name: ".models/Qwen2.5-Math-1.5B-Instruct"
+batch_size: 64
+gradient_accumulation_steps: 4
+val_every_steps: 20
 save_at_end: true
