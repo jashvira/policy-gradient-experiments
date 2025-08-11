@@ -20,7 +20,7 @@ class SFTTrainConfig:
     batch_size: int = 64
     val_samples: Union[int, str] = "all"
     unique_train_examples: Union[int, str] = "all"  # int or "all"
-    num_epochs: int = 10
+    num_epochs: int = 20
 
     # Optimization
     gradient_accumulation_steps: int = 8
@@ -38,10 +38,10 @@ class SFTTrainConfig:
     lr_scheduler: str = "cosine"  # or "linear"
 
     # Evaluation/generation
-    val_every_steps: int = 100
+    val_every_steps: int = 5
     max_new_tokens: int = 1024
     val_temperature: float = 0.0
-    val_top_p: float = 0.95
+    val_top_p: float = 1.0
     eval_before_training: bool = True
 
     # Logging
