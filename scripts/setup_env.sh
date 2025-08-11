@@ -198,21 +198,38 @@ fi
 
 if [[ "${INSTALL_FLASH_ATTN}" -eq 1 ]]; then
   section "Installing flash-attn (optional)"
+
+  # Determine which Python to use for testing
+  PYTHON_CMD="python"
+  if [[ "${USE_UV}" -eq 1 ]] && command -v uv >/dev/null 2>&1; then
+    # Use uv's Python for consistent environment
+    PYTHON_CMD="uv run python"
+  fi
+
   # 1) Try prebuilt wheel (fast path, no toolkit required)
+  info "Attempting prebuilt wheel installation..."
   if [[ "${USE_UV}" -eq 1 ]] && command -v uv >/dev/null 2>&1; then
     uv pip install --no-build-isolation --only-binary=:all: flash-attn || true
   else
     python -m pip install --no-build-isolation --only-binary=:all: flash-attn || true
   fi
 
-  if python -c 'import flash_attn' >/dev/null 2>&1; then
-    info "flash-attn installed via wheel."
+  # Test if flash-attn is working
+  if ${PYTHON_CMD} -c 'import flash_attn; print("OK")' >/dev/null 2>&1; then
+    info "flash-attn installed via prebuilt wheel."
   else
-    # 2) Prepare for source build
+    # 2) Ensure torch is available for build requirements (critical for uv)
+    info "Prebuilt wheel failed, ensuring torch is available for build..."
+    if [[ "${USE_UV}" -eq 1 ]] && command -v uv >/dev/null 2>&1; then
+      # Make sure torch is installed in the uv environment
+      uv pip install "torch>=2.0" || warn "Could not ensure torch for build"
+    fi
+
+    # 3) Prepare for source build
     warn "flash-attn wheel not available; attempting source build (this can be slow)."
 
     # Compute architectures to build for
-    export TORCH_CUDA_ARCH_LIST="$(python - <<'PY'
+    export TORCH_CUDA_ARCH_LIST="$(${PYTHON_CMD} - <<'PY'
 import torch
 arches=set()
 try:
@@ -241,17 +258,24 @@ PY
     # Ensure build prerequisites
     if [[ "${USE_UV}" -eq 1 ]] && command -v uv >/dev/null 2>&1; then
       uv pip install ninja packaging || true
+      # Critical: use --no-build-isolation with torch already available
       uv pip install --no-build-isolation flash-attn || true
     else
       python -m pip install ninja packaging || true
       python -m pip install --no-build-isolation flash-attn || true
     fi
 
-    if python -c 'import flash_attn' >/dev/null 2>&1; then
+    # Final test
+    if ${PYTHON_CMD} -c 'import flash_attn; print("OK")' >/dev/null 2>&1; then
       info "flash-attn installed from source."
     else
       warn "flash-attn installation failed; continuing without."
     fi
+  fi
+
+  # Show flash-attn status
+  if ${PYTHON_CMD} -c 'import flash_attn; print(f"flash-attn {flash_attn.__version__} ready")' 2>/dev/null; then
+    info "flash-attn is ready to use"
   fi
 fi
 
