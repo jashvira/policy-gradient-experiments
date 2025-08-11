@@ -200,8 +200,8 @@ def train_model(
                 "train_step": train_step,
             })
 
-        # Periodic validation check
-        if train_step % val_every_steps == 0:
+        # Periodic validation check (disabled if val_every_steps <= 0)
+        if val_every_steps > 0 and train_step % val_every_steps == 0:
             result = _run_validation()
             eval_step += 1
             _log_eval(result)
@@ -250,12 +250,12 @@ def train_model(
             # Return aggregates for wandb logging
             return {"aggregates": result.get("metadata", {}).get("overall_metrics", {})}
         finally:
-            # Best-effort cleanup to free memory between validations
+            # Aggressive cleanup to free memory between validations
             try:
                 del llm_eval
-                torch.cuda.empty_cache()
             except Exception:
                 pass
+
             # Clean up temporary checkpoint
             try:
                 import shutil
@@ -263,11 +263,26 @@ def train_model(
             except Exception:
                 pass
 
+            # Force GPU memory cleanup on both devices
+            try:
+                if torch.cuda.is_available():
+                    # Clear cache on eval device
+                    torch.cuda.set_device(eval_device)
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
+                    # Clear cache on training device
+                    torch.cuda.set_device(device)
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
+
     train_step = 0
     eval_step = 0
 
     # Optional pre-training evaluation
-    if eval_before_training:
+    if eval_before_training and val_every_steps > 0:
         result = _run_validation()
         eval_step += 1
         _log_eval(result)
