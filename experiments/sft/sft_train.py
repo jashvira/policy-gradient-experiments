@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Union
 from experiments.sft.config_schema import SFTTrainConfig
-from utils.vllm_utils import init_vllm, create_sampling_params, load_policy_into_vllm_instance
+from utils.vllm_utils import init_vllm, create_sampling_params, load_policy_into_vllm_instance, evaluate_vllm
 from utils.math_data import load_math_validation, format_with_r1_zero_prompt
 from utils.training_utils import (
     tokenize_prompt_and_output,
@@ -106,6 +106,9 @@ def train_model(
     wandb.define_metric("train/*", step_metric="train_step")
     wandb.define_metric("eval/*", step_metric="eval_step")
 
+    # Disable HF generation logging during training batches for now
+    enable_train_generation_logging = False
+
     optimizer = build_adamw(
         model.parameters(),
         lr=lr,
@@ -118,7 +121,7 @@ def train_model(
     model.train()
     optimizer.zero_grad()
 
-    # Setup vLLM on configured eval device (required)
+    # Validate eval device but defer vLLM engine creation to validation time
     if eval_device == "cpu":
         raise RuntimeError(
             "eval_device=cpu is not supported by vLLM. Please set a CUDA device, e.g., cuda:1")
@@ -126,12 +129,6 @@ def train_model(
         # Avoid trying to share the same device as training for vLLM
         raise RuntimeError(
             "vLLM eval on the same device as training is not supported. Use a different eval_device.")
-    llm = init_vllm(
-        model_id=(model_name_for_vllm or run_name),
-        device=eval_device,
-        seed=seed,
-        gpu_memory_utilization=vllm_gpu_mem_utilization,
-    )
 
     # Compute total optimizer steps for scheduling across all epochs
     steps_per_epoch = math.ceil(len(train_batches) / gradient_accumulation_steps)
@@ -173,28 +170,98 @@ def train_model(
             })
         wandb.log(payload)
 
+    def _finalize_train_step(batch: dict, loss: torch.Tensor) -> None:
+        """Complete a training step: clip grads, optimizer step, logging, validation check"""
+        nonlocal train_step, eval_step
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad()
+        train_step += 1
+        _log_train(loss)
+
+        # Optional: training batch generation+metrics (disabled by default)
+        if enable_train_generation_logging:
+            train_result = log_generations(
+                model=model,
+                tokenizer=tokenizer,
+                prompts=batch["prompts"],
+                ground_truths=batch["responses"],
+                reward_fn=r1_zero_reward_fn,
+            )
+            train_aggregates = train_result.get("aggregates", {})
+            wandb.log({
+                "train/avg_response_length": train_aggregates.get("avg_response_length", 0.0),
+                "train/avg_response_token_entropy": train_aggregates.get("avg_response_token_entropy", 0.0),
+                "train/answer_accuracy": train_aggregates.get("answer_accuracy", 0.0),
+                "train/format_accuracy": train_aggregates.get("format_accuracy", 0.0),
+                "train/overall_accuracy": train_aggregates.get("overall_accuracy", 0.0),
+                "train_step": train_step,
+            })
+
+        # Periodic validation check
+        if train_step % val_every_steps == 0:
+            result = _run_validation()
+            eval_step += 1
+            _log_eval(result)
+
     # Helper to run validation via vLLM; returns result dict
     def _run_validation() -> dict:
-        try:
-            load_policy_into_vllm_instance(model, llm)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load weights into vLLM for validation: {e}") from e
+        # vLLM engines are not designed for live weight mutation. Save the
+        # current HF model to disk and initialize a fresh vLLM instance from it.
+        tmp_ckpt_dir = Path(val_log_dir) / "_tmp_vllm_ckpt"
+        tmp_ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        # Persist model and tokenizer
+        tokenizer.save_pretrained(tmp_ckpt_dir)
+        model.save_pretrained(tmp_ckpt_dir)
+
+        # Create structured output directory for this validation step
+        eval_output_dir = Path("eval_runs") / run_name / f"step_{train_step}"
+        eval_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Spin up a vLLM engine from the saved checkpoint on the eval device
+        llm_eval = init_vllm(
+            model_id=str(tmp_ckpt_dir),
+            device=eval_device,
+            seed=seed,
+            gpu_memory_utilization=vllm_gpu_mem_utilization,
+        )
 
         sampling = create_sampling_params(
             temperature=val_temperature, top_p=val_top_p, max_tokens=max_new_tokens
         )
-        return log_generations(
-            model=model,  # used for entropy/log-probs
-            tokenizer=tokenizer,
-            prompts=val_prompts,
-            ground_truths=val_answers,
-            reward_fn=r1_zero_reward_fn,
-            vllm_model=llm,
-            vllm_sampling_params=sampling,
-            output_dir=str(val_log_dir),
-            model_name=run_name,
-        )
+
+        try:
+            # Use evaluate_vllm directly - it handles generation, evaluation, and storage
+            result = evaluate_vllm(
+                vllm_model=llm_eval,
+                reward_fn=r1_zero_reward_fn,
+                prompts=val_prompts,
+                ground_truths=val_answers,
+                eval_sampling_params=sampling,
+                output_dir=str(eval_output_dir),
+                model_name=f"{run_name}_step_{train_step}",
+                problem_metadata=None,
+                save_full_responses=True,
+                write_results=True,  # Store results to disk
+            )
+            # Return aggregates for wandb logging
+            return {"aggregates": result.get("metadata", {}).get("overall_metrics", {})}
+        finally:
+            # Best-effort cleanup to free memory between validations
+            try:
+                del llm_eval
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            # Clean up temporary checkpoint
+            try:
+                import shutil
+                shutil.rmtree(tmp_ckpt_dir)
+            except Exception:
+                pass
 
     train_step = 0
     eval_step = 0
@@ -240,35 +307,14 @@ def train_model(
 
             # Clip and step on accumulation boundary
             if (idx + 1) % gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=grad_clip)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                train_step += 1
-                _log_train(loss)
-
-                # Periodic validation using vLLM (or HF fallback)
-                if train_step % val_every_steps == 0:
-                    result = _run_validation()
-                    eval_step += 1
-                    _log_eval(result)
+                _finalize_train_step(batch, loss)
 
         # Finalize leftover gradients if the number of microbatches is not
         # divisible by gradient_accumulation_steps. This ensures the last
         # partial accumulation is not dropped.
         remainder = len(train_batches) % gradient_accumulation_steps
         if remainder != 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-            train_step += 1
-            _log_train(loss)
-            if train_step % val_every_steps == 0:
-                result = _run_validation()
-                eval_step += 1
-                _log_eval(result)
+            _finalize_train_step(batch, loss)
 
     # Always run a final validation and record summary metrics
     try:
