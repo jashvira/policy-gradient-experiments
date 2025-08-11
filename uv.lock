@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
@@ -2828,6 +2828,7 @@ dependencies = [
     { name = "peft" },
     { name = "pylatexenc" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "sympy" },
     { name = "torch" },
     { name = "transformers" },
@@ -2856,6 +2857,7 @@ requires-dist = [
     { name = "peft", specifier = "<0.16" },
     { name = "pylatexenc" },
     { name = "pytest", specifier = ">=8.4.1" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "sympy" },
     { name = "torch", specifier = ">=2.6" },
     { name = "transformers", specifier = ">=4.51.0" },
