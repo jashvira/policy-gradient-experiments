@@ -20,6 +20,7 @@ dependencies = [
     "sympy",
     "PyYAML>=6.0.2",
     "pytest>=8.4.1",
+    "flash-attn>=2.8.2",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +29,7 @@ dev = [
     "ipykernel>=6.30.0",
     "ipython>=9.4.0",
 ]
+
+[tool.uv]
+# Flash Attention requires special build configuration
+no-build-isolation-package = ["flash-attn"]

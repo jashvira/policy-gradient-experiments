@@ -4,6 +4,10 @@ SFT training script with periodic vLLM validation and wandb logging.
 Loads hyperparameters from a YAML config file.
 """
 
+import os
+# Set memory allocation config before any PyTorch imports
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 import sys
 from pathlib import Path
 
@@ -12,6 +16,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import atexit
 import math
 import os
 import torch
@@ -21,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Union
 from experiments.sft.config_schema import SFTTrainConfig
-from utils.vllm_utils import init_vllm, create_sampling_params, load_policy_into_vllm_instance, evaluate_vllm
+from utils.vllm_utils import init_vllm, create_sampling_params, load_policy_into_vllm_instance, evaluate_vllm, destroy_vllm_instance
 from utils.math_data import load_math_validation, format_with_r1_zero_prompt
 from utils.training_utils import (
     tokenize_prompt_and_output,
@@ -179,6 +184,10 @@ def train_model(
         scheduler.step()
         optimizer.zero_grad()
         train_step += 1
+
+        # Progress update on optimizer step
+        print(f"  Completed optimizer step {train_step}/{steps_per_epoch * max(1, num_epochs)} (loss: {loss.item():.4f})")
+
         _log_train(loss)
 
         # Optional: training batch generation+metrics (disabled by default)
@@ -202,9 +211,11 @@ def train_model(
 
         # Periodic validation check (disabled if val_every_steps <= 0)
         if val_every_steps > 0 and train_step % val_every_steps == 0:
+            print(f"  Running validation at step {train_step}...")
             result = _run_validation()
             eval_step += 1
             _log_eval(result)
+            print(f"  Validation completed (accuracy: {result.get('aggregates', {}).get('answer_accuracy', 0.0):.3f})")
 
     # Helper to run validation via vLLM; returns result dict
     def _run_validation() -> dict:
@@ -250,9 +261,9 @@ def train_model(
             # Return aggregates for wandb logging
             return {"aggregates": result.get("metadata", {}).get("overall_metrics", {})}
         finally:
-            # Aggressive cleanup to free memory between validations
+            # Proper cleanup to free memory and distributed resources between validations
             try:
-                del llm_eval
+                destroy_vllm_instance(llm_eval)
             except Exception:
                 pass
 
@@ -286,8 +297,22 @@ def train_model(
         result = _run_validation()
         eval_step += 1
         _log_eval(result)
+    print(f"Starting training: {len(train_batches)} batches per epoch, {max(1, num_epochs)} epochs")
+    print(f"Total steps: {len(train_batches) * max(1, num_epochs)}, optimizer steps: {steps_per_epoch * max(1, num_epochs)}")
+
     for epoch in range(int(max(1, num_epochs))):
+        print(f"\n=== Epoch {epoch + 1}/{max(1, num_epochs)} ===")
         for idx, batch in enumerate(train_batches):
+            batch_num = idx + 1
+            total_batches = len(train_batches)
+
+            # Print progress every 10 batches or on first/last batch
+            if batch_num == 1 or batch_num == total_batches or batch_num % 10 == 0:
+                print(f"Epoch {epoch + 1}/{max(1, num_epochs)}, Batch {batch_num}/{total_batches} (Step {train_step + 1})")
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated(device) / 1e9
+                    reserved = torch.cuda.memory_reserved(device) / 1e9
+                    print(f"  GPU memory: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved")
             # Tokenize with response mask
             tokenized = tokenize_prompt_and_output(
                 prompt_strs=batch["prompts"],
@@ -300,6 +325,12 @@ def train_model(
             attention_mask = tokenized.get("attention_mask")
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
+
+            # Log sequence info for OOM debugging
+            seq_len = input_ids.shape[1]
+            batch_size = input_ids.shape[0]
+            if batch_num == 1 or batch_num == total_batches or batch_num % 10 == 0:
+                print(f"  Batch size: {batch_size}, Max sequence length: {seq_len}")
 
             # Get per-token log-probabilities
             scores = get_response_log_probs(
@@ -353,6 +384,10 @@ def save_model(model, tokenizer, output_dir: str = "./sft_output"):
 
 
 def main():
+    # Register distributed cleanup at program exit as additional safety
+    from utils.vllm_utils import cleanup_distributed_process_groups
+    atexit.register(cleanup_distributed_process_groups)
+
     parser = argparse.ArgumentParser(
         description="SFT training with periodic vLLM validation")
     parser.add_argument("--config", type=str, default=None,

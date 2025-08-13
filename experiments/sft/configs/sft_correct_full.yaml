@@ -1,6 +1,9 @@
-sft_data_path: "/home/jash404/RL_experiments/MATH/sft_correct.jsonl"
+sft_data_path: "./MATH/sft_correct.jsonl"
 unique_train_examples: "all"
-val_every_steps: 4
 run_name: sft-correct-full
 save_at_end: true
-
+num_epochs: 10
+model_name: ".models/Qwen2.5-Math-1.5B-Instruct"
+batch_size: 16
+gradient_accumulation_steps: 8
+val_every_steps: 20

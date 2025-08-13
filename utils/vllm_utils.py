@@ -3,6 +3,7 @@
 vLLM utilities for MATH dataset inference.
 """
 
+import atexit
 import json
 import os
 import importlib
@@ -18,6 +19,53 @@ from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
 from utils.drgrpo_grader import extract_answer
+
+
+def cleanup_distributed_process_groups():
+    """Clean up any distributed process groups to prevent resource leaks."""
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.destroy_process_group()
+    except Exception:
+        # Silently ignore errors during cleanup
+        pass
+
+
+def ensure_distributed_cleanup():
+    """Ensure distributed cleanup happens at program exit."""
+    atexit.register(cleanup_distributed_process_groups)
+
+
+def destroy_vllm_instance(llm_instance: LLM) -> None:
+    """Properly destroy a vLLM instance with distributed cleanup."""
+    try:
+        # First try to clean up the LLM instance
+        if hasattr(llm_instance, 'llm_engine'):
+            engine = llm_instance.llm_engine
+            # Try to get the driver worker to clean up properly
+            if hasattr(engine, 'model_executor') and hasattr(engine.model_executor, 'driver_worker'):
+                worker = engine.model_executor.driver_worker
+                if hasattr(worker, 'model_runner') and hasattr(worker.model_runner, 'model'):
+                    # Clear the model to free memory
+                    del worker.model_runner.model
+
+        # Clean up the instance itself
+        del llm_instance
+
+        # Force cleanup of any distributed state
+        cleanup_distributed_process_groups()
+
+        # Force garbage collection and CUDA cleanup
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    except Exception:
+        # Silently handle any cleanup errors
+        pass
 
 
 def load_vllm_model(model_path: str, **kwargs) -> LLM:
@@ -51,6 +99,9 @@ def init_vllm(
     Applies TRL-style patches to ensure world size = 1 and disable profiling assertions.
     Places the model on the specified device and sets a deterministic seed.
     """
+    # Ensure distributed cleanup is registered for program exit
+    ensure_distributed_cleanup()
+
     vllm_set_random_seed(seed)
 
     # Monkeypatch per TRL to ensure single-process behavior and avoid profiling checks
