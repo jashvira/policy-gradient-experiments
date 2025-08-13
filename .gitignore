@@ -43,11 +43,17 @@ env/
 model_checkpoints/
 outputs/
 checkpoints/
-*.safetensors
-*.pth
-*.pt
-*.model
 .models/
+
+# Uncompressed model files (we want compressed versions tracked with LFS)
+# Ignore uncompressed models but allow all other files
+**/model.safetensors
+**/pytorch_model.bin
+**/model.pth
+**/model.pt
+
+# Allow compressed model files (tracked with LFS)
+!*.zst
 
 # Training artifacts
 wandb/
