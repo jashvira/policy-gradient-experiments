@@ -8,7 +8,7 @@ Post-training experiments on the MATH dataset (Hendrycks et al.) for mathematica
 Fine-tune base models on MATH training data with YAML-based configuration system and multi-device training.
 
 ### Expert Iteration (EI) 
-Policy gradient training with generated solutions. Samples multiple responses, computes rewards, and performs gradient updates using r1_zero grading.
+Iterative self-improvement by filtering correct solutions. Samples multiple responses from the model, filters correct ones using r1_zero grading, and fine-tunes on the filtered dataset.
 
 ### Baseline Evaluation
 Evaluate pretrained models on MATH validation set using standardised evaluation pipeline.
