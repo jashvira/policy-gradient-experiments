@@ -1,0 +1,29 @@
+# Expert Iteration: G=16 rollouts, batch=2048, 1 epoch per step
+model_name: "Qwen/Qwen2.5-Math-1.5B"
+run_name: "ei-g16-b2048-e1"
+
+# EI settings
+n_ei_steps: 5
+G: 16
+batch_size_per_ei_step: 2048
+sft_epochs_per_step: 1  # More rollouts, fewer epochs
+
+# Generation settings
+sampling_temperature: 1.0
+sampling_top_p: 1.0
+sampling_min_tokens: 4
+sampling_max_tokens: 1024
+
+# Training settings
+batch_size: 16
+gradient_accumulation_steps: 8
+lr: 5e-5
+grad_clip: 1.0
+
+# Validation
+val_samples: 500
+val_every_steps: 10
+
+# Logging
+project: "ei-math"
+seed: 42
