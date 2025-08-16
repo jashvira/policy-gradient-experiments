@@ -20,7 +20,8 @@ dependencies = [
     "sympy",
     "PyYAML>=6.0.2",
     "pytest>=8.4.1",
-    "flash-attn>=2.8.2",
+    "typer>=0.15.0",
+    "flash-attn>=2.8.2",  # Temporarily disabled for testing
 ]
 
 [project.optional-dependencies]
