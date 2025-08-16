@@ -1,0 +1,65 @@
+# Test GRPO configuration with small parameters for quick validation
+
+# GRPO algorithm parameters
+n_grpo_steps: 2
+rollout_batch_size: 16
+group_size: 4
+train_batch_size: 16
+epochs_per_rollout_batch: 1
+
+# Generation/sampling
+sampling_temperature: 1.0
+sampling_min_tokens: 4
+sampling_max_tokens: 256
+sampling_top_p: 1.0
+
+# Loss configuration
+loss_type: "reinforce_with_baseline"
+use_std_normalization: true
+advantage_eps: 1.0e-6
+cliprange: 0.2
+
+# Optimization
+learning_rate: 1.0e-5
+lr: 1.0e-5
+gradient_accumulation_steps: 8  # microbatch size is 2
+weight_decay: 0.0
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_eps: 1.0e-8
+grad_clip: 1.0
+
+# Model and devices
+model_name: "Qwen/Qwen2.5-Math-1.5B-Instruct"
+train_device: "cuda:0"
+eval_device: "cuda:1"
+
+# Memory and performance
+gpu_memory_utilization: 0.85
+vllm_gpu_mem_utilization: 0.85
+
+# Data and validation
+data_path: null
+val_every_grpo_steps: 1  # Validate every step for testing
+val_rollout_batch_size: 32
+val_samples: 64  # Small for quick testing
+val_temperature: 0.0
+val_top_p: 1.0
+max_new_tokens: 256
+
+# Checkpointing and saving
+save_dir: "./grpo_test_output"
+save_at_end: true
+save_every_grpo_steps: 1
+val_log_dir: "logs/grpo_test_val_generations"
+
+# Logging
+project: "grpo-math-test"
+run_name: "grpo-test"
+wandb_entity: null
+seed: 42
+
+# Scheduler (inherited from base)
+warmup_steps: 0
+warmup_ratio: 0.0
+lr_scheduler: "cosine"
