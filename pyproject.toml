@@ -7,7 +7,6 @@ requires-python = ">=3.11"
 dependencies = [
     "datasets>=4.0.0",
     "evaluate>=0.4.5",
-    "torch>=2.6",
     "transformers>=4.51.0",
     "trl<0.20",
     "peft<0.16",
@@ -21,7 +20,6 @@ dependencies = [
     "PyYAML>=6.0.2",
     "pytest>=8.4.1",
     "typer>=0.15.0",
-    "flash-attn>=2.8.2",  # Temporarily disabled for testing
 ]
 
 [project.optional-dependencies]
@@ -31,6 +29,4 @@ dev = [
     "ipython>=9.4.0",
 ]
 
-[tool.uv]
-# Flash Attention requires special build configuration
-no-build-isolation-package = ["flash-attn"]
+
