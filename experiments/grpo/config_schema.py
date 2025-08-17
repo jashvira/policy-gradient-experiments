@@ -62,6 +62,11 @@ class GRPOTrainConfig(BaseTrainConfig):
     
     def resolve(self, repo_root: Optional[Path] = None) -> "GRPOTrainConfig":
         """Fill GRPO-specific defaults after construction."""
+        # Set repo_root for internal use
+        if repo_root is None:
+            repo_root = _REPO_ROOT
+        self.repo_root = repo_root
+        
         # Call parent resolve first
         super().resolve(repo_root)
         
