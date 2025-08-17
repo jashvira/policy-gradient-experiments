@@ -10,7 +10,6 @@ dependencies = [
     "transformers>=4.51.0",
     "trl<0.20",
     "peft<0.16",
-    "vllm>=0.10.0",
     "wandb>=0.21.0",
     "matplotlib>=3.10.3",
     "latex2sympy2-extended",

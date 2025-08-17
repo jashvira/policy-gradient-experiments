@@ -143,20 +143,21 @@ def train_on_rollout_batch(
     input_ids = tokenized["input_ids"].to(device)
     labels = tokenized["labels"].to(device)
     response_mask = tokenized["response_mask"].to(device)
-    
-    # Get current policy log probs and token entropy
-    policy_outputs = get_response_log_probs(
-        model=model,
-        input_ids=input_ids,
-        labels=labels,
-        return_token_entropy=True
-    )
+
+    # Get current policy log probs and token entropy under autocast
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        policy_outputs = get_response_log_probs(
+            model=model,
+            input_ids=input_ids,
+            labels=labels,
+            return_token_entropy=True
+        )
     policy_log_probs = policy_outputs["log_probs"]
     
     # Compute token entropy if not returned by get_response_log_probs
     token_entropy = policy_outputs.get("token_entropy")
     if token_entropy is None:
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             logits = model(input_ids).logits
             token_entropy = compute_entropy(logits)
     
@@ -290,23 +291,31 @@ def run_grpo_step(
         advantage_eps=config.advantage_eps,
         normalize_by_std=config.use_std_normalization,
     )
+    # Ensure advantages are on the same device as the training tensors
+    advantages = advantages.to(device)
     
     # Get old policy log probs if needed for grpo_clip
     old_log_probs = None
     if config.loss_type == "grpo_clip":
         print("Computing old policy log probs...")
         tokenized = tokenize_prompt_and_output(all_prompts, all_responses, tokenizer)
-        input_ids = tokenized["input_ids"].to(device)
-        labels = tokenized["labels"].to(device)
-        
-        with torch.no_grad():
-            old_outputs = get_response_log_probs(
-                model=old_model,
-                input_ids=input_ids,
-                labels=labels,
-                return_token_entropy=False
-            )
-            old_log_probs = old_outputs["log_probs"].detach()  # Ensure no gradients
+        input_ids_full = tokenized["input_ids"].to(device)
+        labels_full = tokenized["labels"].to(device)
+
+        # Chunked inference for memory safety; reuse micro_train_batch_size
+        chunk_size = max(1, config.micro_train_batch_size)
+        old_log_probs_chunks = []
+        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            for start in range(0, input_ids_full.shape[0], chunk_size):
+                end = min(start + chunk_size, input_ids_full.shape[0])
+                old_outputs = get_response_log_probs(
+                    model=old_model,
+                    input_ids=input_ids_full[start:end],
+                    labels=labels_full[start:end],
+                    return_token_entropy=False
+                )
+                old_log_probs_chunks.append(old_outputs["log_probs"].detach())
+        old_log_probs = torch.cat(old_log_probs_chunks, dim=0)
     
     # Training loop (Algorithm 3, Lines 8-9)
     print(f"Training for {config.epochs_per_rollout_batch} epochs...")
@@ -392,11 +401,13 @@ def evaluate_on_validation(
         write_results=True,
     )
     
+    overall_metrics = results.get("metadata", {}).get("overall_metrics", {})
+    total_samples = results.get("metadata", {}).get("total_samples", 0)
     return {
-        "val_accuracy": results["accuracy"],
-        "val_format_accuracy": results["format_accuracy"],
-        "val_answer_accuracy": results["answer_accuracy"],
-        "val_total": results["total"],
+        "val_accuracy": float(overall_metrics.get("overall_accuracy", 0.0)),
+        "val_format_accuracy": float(overall_metrics.get("format_accuracy", 0.0)),
+        "val_answer_accuracy": float(overall_metrics.get("answer_accuracy", 0.0)),
+        "val_total": int(total_samples),
     }
 
 
@@ -435,6 +446,12 @@ def main(
     
     # Create old model copy for GRPO
     old_model = copy.deepcopy(model)
+
+    # Optional: compile model for faster training (avoid compiling before deepcopy)
+    try:
+        model = torch.compile(model)
+    except Exception:
+        pass
     
     # Setup optimizer
     optimizer = build_adamw(
@@ -471,8 +488,16 @@ def main(
             # GRPO Algorithm: First copy current policy to old policy (Line 4)
             copy_model_weights(model, old_model)
             
-            # Load current model weights into vLLM
-            load_policy_into_vllm_instance(model, vllm_model)
+            # Reload vLLM from current policy checkpoint to reflect updates
+            load_policy_into_vllm_instance(
+                model,
+                vllm_model,
+                tokenizer=tokenizer,
+                eval_device=config_obj.eval_device,
+                seed=config_obj.seed + step,
+                gpu_memory_utilization=config_obj.vllm_gpu_mem_utilization,
+                tmp_dir=Path(config_obj.val_log_dir) / "_tmp_vllm_ckpt_grpo",
+            )
             
             # Run GRPO step
             step_metrics = run_grpo_step(
@@ -496,6 +521,16 @@ def main(
             
             # Periodic validation
             if (step + 1) % config_obj.val_every_grpo_steps == 0:
+                # Strictly reload vLLM to reflect the latest HF weights before eval
+                load_policy_into_vllm_instance(
+                    model,
+                    vllm_model,
+                    tokenizer=tokenizer,
+                    eval_device=config_obj.eval_device,
+                    seed=config_obj.seed + step,
+                    gpu_memory_utilization=config_obj.vllm_gpu_mem_utilization,
+                    tmp_dir=Path(config_obj.val_log_dir) / "_tmp_vllm_ckpt_grpo",
+                )
                 val_metrics = evaluate_on_validation(
                     vllm_model=vllm_model,
                     val_problems=val_problems,

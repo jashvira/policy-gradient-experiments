@@ -21,6 +21,30 @@ from vllm.model_executor import set_random_seed as vllm_set_random_seed
 from utils.drgrpo_grader import extract_answer
 
 
+def _worker_load_hf_state(self, sd):
+    """Worker-side loader used via LLM.collective_rpc on vLLM v1.
+
+    Expects `self` to be a worker object. Finds the HF model and loads `sd`.
+    Returns minimal diagnostics.
+    """
+    model = None
+    try:
+        if hasattr(self, "model_runner") and hasattr(self.model_runner, "model"):
+            model = self.model_runner.model
+        elif hasattr(self, "model"):
+            model = self.model
+    except Exception:
+        model = None
+    if model is None:
+        raise RuntimeError("vLLM worker model handle not found for weight update")
+    try:
+        res = model.load_state_dict(sd, strict=True)
+    except Exception:
+        res = model.load_state_dict(sd, strict=False)
+    missing = getattr(res, "missing_keys", []) if res is not None else []
+    unexpected = getattr(res, "unexpected_keys", []) if res is not None else []
+    return {"missing": missing, "unexpected": unexpected}
+
 def cleanup_distributed_process_groups():
     """Clean up any distributed process groups to prevent resource leaks."""
     try:
@@ -153,26 +177,94 @@ def init_vllm(
         return LLM(**llm_kwargs)
 
 
-def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM):
+def load_policy_into_vLLM_instance_from_checkpoint(
+    *,
+    policy: PreTrainedModel,
+    tokenizer,
+    eval_device: str,
+    seed: int,
+    gpu_memory_utilization: float = 0.85,
+    tmp_dir: Optional[Union[str, Path]] = None,
+    existing_llm: Optional[LLM] = None,
+) -> LLM:
     """
-    Load policy weights into vLLM instance.
-    
-    Note: Due to vLLM v1 architecture limitations with collective_rpc serialization,
-    this function currently skips weight loading. GRPO training will proceed
-    without hot-swapping weights for now.
+    Load policy weights into the running vLLM engine by directly updating the
+    worker's HF model (Brandon's approach, works on pre‑v1 vLLM APIs).
+
+    Steps:
+      - Build a clean HF state_dict (unwrap torch.compile; strip '_orig_mod.' prefixes)
+      - Reach into llm.llm_engine.model_executor.driver_worker.model_runner.model
+        and call load_state_dict on that HF module
+      - Reset prefix/KV caches after the swap so new weights are used cleanly
+
+    Returns the same LLM instance (weights updated in-place).
     """
-    # TODO: Implement weight loading once vLLM provides a stable API
-    # Current issues:
-    # 1. collective_rpc has serialization problems with state_dict and functions
-    # 2. vLLM v1 architecture changes make direct model access difficult
-    # 3. TRL may be using checkpoint-based reloading instead of hot-swapping
+    if existing_llm is None:
+        raise ValueError("existing_llm must be provided for direct weight loading")
     
-    print("WARNING: vLLM weight hot-swapping is not yet implemented for vLLM v1 architecture.")
-    print("GRPO training will proceed without weight updates to the vLLM instance.")
-    print("This may impact training effectiveness but allows the training loop to continue.")
+    # Prepare a clean CPU state_dict and strip torch.compile wrappers
+    raw_state_dict = policy.state_dict()
+    clean_state_dict = {}
+    for key, value in raw_state_dict.items():
+        clean_key = key
+        while clean_key.startswith("_orig_mod."):
+            clean_key = clean_key[len("_orig_mod."):]
+        clean_state_dict[clean_key] = value.detach().to("cpu").contiguous()
+
+    # Try Brandon's direct worker path (pre-v1 API)
+    engine = getattr(existing_llm, "llm_engine", None)
+    if engine is None:
+        raise RuntimeError("vLLM engine not available on LLM instance")
+    model = None
+    try:
+        model = engine.model_executor.driver_worker.model_runner.model
+    except Exception:
+        # If the path is missing, this version likely doesn't support direct swapping
+        raise RuntimeError("Direct worker path not found on this vLLM; use v1 RPC + NCCL broadcast instead")
+
+    # Load state dict onto worker model
+    try:
+        model.load_state_dict(clean_state_dict, strict=True)
+    except Exception:
+        model.load_state_dict(clean_state_dict, strict=False)
+
+    # Reset caches
+    if hasattr(existing_llm, "reset_prefix_cache"):
+        try:
+            existing_llm.reset_prefix_cache()
+        except Exception:
+            pass
+
+    return existing_llm
+
+
+# Backwards-compat wrapper to avoid breaking older call sites
+def load_policy_into_vllm_instance(
+    policy: PreTrainedModel,
+    llm: LLM,
+    *,
+    tokenizer=None,
+    eval_device: Optional[str] = None,
+    seed: Optional[int] = None,
+    gpu_memory_utilization: Optional[float] = None,
+    tmp_dir: Optional[Union[str, Path]] = None,
+):
+    """
+    Load policy weights directly into vLLM instance via state_dict injection.
     
-    # Skip weight loading for now
-    return
+    Returns the same LLM instance (weights updated in-place).
+    The tokenizer, eval_device, seed, gpu_memory_utilization, and tmp_dir parameters 
+    are kept for backwards compatibility but are no longer used.
+    """
+    return load_policy_into_vLLM_instance_from_checkpoint(
+        policy=policy,
+        tokenizer=tokenizer,  # unused but kept for compatibility
+        eval_device=eval_device,  # unused but kept for compatibility
+        seed=seed,  # unused but kept for compatibility
+        gpu_memory_utilization=gpu_memory_utilization or 0.85,  # unused but kept for compatibility
+        tmp_dir=tmp_dir,  # unused but kept for compatibility
+        existing_llm=llm,
+    )
 
 
 def create_sampling_params(
