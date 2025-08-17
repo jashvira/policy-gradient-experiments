@@ -51,6 +51,11 @@ def setup_wandb(config: GRPOTrainConfig):
     resolved_project = os.environ.get("WANDB_PROJECT", config.project)
     resolved_entity = os.environ.get("WANDB_ENTITY", config.wandb_entity)
     
+    # Skip wandb initialization if project is None or empty
+    if not resolved_project:
+        print("Wandb disabled (project is None or empty)")
+        return
+    
     wandb.init(
         project=resolved_project,
         entity=resolved_entity,
@@ -417,8 +422,8 @@ def main(
     
     # Load data
     print("Loading MATH dataset...")
-    train_problems, train_answers = load_math_train()
-    val_problems, val_answers = load_math_validation()
+    train_problems, train_answers, _ = load_math_train()
+    val_problems, val_answers, _ = load_math_validation()
     print(f"Loaded {len(train_problems)} training problems, {len(val_problems)} validation problems")
     
     # Setup models and tokenizer
@@ -463,8 +468,11 @@ def main(
     
     try:
         for step in range(config_obj.n_grpo_steps):
+            # GRPO Algorithm: First copy current policy to old policy (Line 4)
+            copy_model_weights(model, old_model)
+            
             # Load current model weights into vLLM
-            load_policy_into_vllm_instance(vllm_model, model)
+            load_policy_into_vllm_instance(model, vllm_model)
             
             # Run GRPO step
             step_metrics = run_grpo_step(
@@ -481,11 +489,9 @@ def main(
                 step=step,
             )
             
-            # Update old model with current weights
-            copy_model_weights(model, old_model)
-            
             # Log metrics
-            wandb.log(step_metrics, step=step)
+            if wandb.run is not None:
+                wandb.log(step_metrics, step=step)
             print(f"Step {step + 1} metrics: {step_metrics}")
             
             # Periodic validation
@@ -497,7 +503,8 @@ def main(
                     config=config_obj,
                     step=step,
                 )
-                wandb.log(val_metrics, step=step)
+                if wandb.run is not None:
+                    wandb.log(val_metrics, step=step)
                 print(f"Validation metrics: {val_metrics}")
             
             # Periodic checkpoint saving
@@ -522,7 +529,8 @@ def main(
             tokenizer.save_pretrained(final_save_path)
             print(f"Saved final model to {final_save_path}")
         
-        wandb.finish()
+        if wandb.run is not None:
+            wandb.finish()
 
 
 if __name__ == "__main__":
