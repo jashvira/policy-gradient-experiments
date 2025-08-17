@@ -31,7 +31,7 @@ adam_eps: 1.0e-8
 grad_clip: 1.0
 
 # Model and devices
-model_name: "Qwen/Qwen2.5-Math-1.5B-Instruct"
+model_name: ".models/Qwen2.5-Math-1.5B-Instruct"
 train_device: "cuda:0"
 eval_device: "cuda:1"
 

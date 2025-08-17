@@ -49,12 +49,12 @@ max_new_tokens: 256
 
 # Checkpointing and saving
 save_dir: "./grpo_test_output"
-save_at_end: true
+save_at_end: false
 save_every_grpo_steps: 1
 val_log_dir: "logs/grpo_test_val_generations"
 
 # Logging
-project: "grpo-math-test"
+project: null  # Disable wandb
 run_name: "grpo-test"
 wandb_entity: null
 seed: 42
