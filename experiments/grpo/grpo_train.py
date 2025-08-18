@@ -35,27 +35,30 @@ from experiments.grpo.grpo_utils import (
     compute_group_normalized_rewards,
     grpo_microbatch_train_step
 )
-from utils.vllm_utils import (
-    init_vllm, create_sampling_params, load_policy_into_vllm_instance, 
-    evaluate_vllm, destroy_vllm_instance
-)
+# vLLM removed; we will use plain Hugging Face generation on a separate inference model/device
 from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
 from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy
 from utils.drgrpo_grader import r1_zero_reward_fn
 from utils.model_utils import setup_model_and_tokenizer
 from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
+from utils.inference_utils import (
+    init_inference_model_from,
+    generate_grouped_responses,
+    greedy_generate_responses,
+    compute_reward_metrics,
+)
 
 
 def setup_wandb(config: GRPOTrainConfig):
     """Initialize wandb logging."""
     resolved_project = os.environ.get("WANDB_PROJECT", config.project)
     resolved_entity = os.environ.get("WANDB_ENTITY", config.wandb_entity)
-    
+
     # Skip wandb initialization if project is None or empty
     if not resolved_project:
         print("Wandb disabled (project is None or empty)")
         return
-    
+
     wandb.init(
         project=resolved_project,
         entity=resolved_entity,
@@ -71,50 +74,53 @@ def sample_rollout_batch(
     answers: List[str],
     n_prompts: int,
     group_size: int,
-    vllm_model,
-    sampling_params,
+    inference_model,
+    tokenizer,
+    config: GRPOTrainConfig,
     seed: int = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     Sample a rollout batch: n_prompts questions, each with group_size responses.
-    
+
     Returns:
         Tuple of (all_prompts, all_responses, all_ground_truths) where each list
         has length n_prompts * group_size
     """
     if seed is not None:
         random.seed(seed)
-    
+
     # Sample n_prompts questions
     indices = random.sample(range(len(problems)), min(n_prompts, len(problems)))
     sampled_problems = [problems[i] for i in indices]
     sampled_answers = [answers[i] for i in indices]
-    
+
     # Format prompts with r1_zero format
     prompts = [format_with_r1_zero_prompt(problem) for problem in sampled_problems]
-    
+
     print(f"Generating rollout batch: {n_prompts} prompts × {group_size} responses = {n_prompts * group_size} total")
-    
-    # Generate group_size responses per prompt
-    sampling_params.n = group_size
-    outputs = vllm_model.generate(prompts, sampling_params)
-    
-    # Flatten to get all prompts, responses, and ground truths
-    all_prompts = []
-    all_responses = []
-    all_ground_truths = []
-    
-    for i, output in enumerate(outputs):
-        prompt = prompts[i]
-        ground_truth = sampled_answers[i]
-        
-        # Each output has group_size responses
-        for j in range(len(output.outputs)):
-            response = output.outputs[j].text
-            all_prompts.append(prompt)
-            all_responses.append(response)
-            all_ground_truths.append(ground_truth)
-    
+
+    # Generate grouped responses via utility
+    responses = generate_grouped_responses(
+        inference_model=inference_model,
+        tokenizer=tokenizer,
+        prompts=prompts,
+        group_size=group_size,
+        max_new_tokens=config.sampling_max_tokens,
+        min_new_tokens=getattr(config, "sampling_min_tokens", 0),
+        sampling_temperature=config.sampling_temperature,
+        sampling_top_p=config.sampling_top_p,
+    )
+
+    # Build flattened results aligned with responses
+    all_prompts: List[str] = []
+    all_responses: List[str] = []
+    all_ground_truths: List[str] = []
+    for prompt_text, answer in zip(prompts, sampled_answers):
+        for _ in range(group_size):
+            all_prompts.append(prompt_text)
+            all_responses.append(responses[len(all_responses)])
+            all_ground_truths.append(answer)
+
     print(f"Generated {len(all_responses)} responses total")
     return all_prompts, all_responses, all_ground_truths
 
@@ -133,11 +139,11 @@ def train_on_rollout_batch(
 ) -> Dict[str, float]:
     """
     Train on a rollout batch using the computed advantages.
-    
+
     Returns metrics dictionary.
     """
     model.train()
-    
+
     # Tokenize all prompt-response pairs
     tokenized = tokenize_prompt_and_output(all_prompts, all_responses, tokenizer)
     input_ids = tokenized["input_ids"].to(device)
@@ -153,14 +159,14 @@ def train_on_rollout_batch(
             return_token_entropy=True
         )
     policy_log_probs = policy_outputs["log_probs"]
-    
+
     # Compute token entropy if not returned by get_response_log_probs
     token_entropy = policy_outputs.get("token_entropy")
     if token_entropy is None:
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             logits = model(input_ids).logits
             token_entropy = compute_entropy(logits)
-    
+
     # Compute train rewards for logging
     train_rewards = {"format": [], "answer": [], "total": []}
     for response, ground_truth in zip(all_responses, all_ground_truths):
@@ -168,7 +174,7 @@ def train_on_rollout_batch(
         train_rewards["format"].append(reward_dict.get("format_reward", 0.0))
         train_rewards["answer"].append(reward_dict.get("answer_reward", 0.0))
         train_rewards["total"].append(reward_dict.get("reward", 0.0))
-    
+
     # Split into microbatches and train
     batch_size = len(all_prompts)
     micro_batch_size = config.micro_train_batch_size
@@ -177,23 +183,23 @@ def train_on_rollout_batch(
     all_metadata = {}
     total_clip_fraction = 0.0
     total_entropy = 0.0
-    
+
     # Zero gradients at start
     optimizer.zero_grad()
-    
+
     for start_idx in range(0, batch_size, micro_batch_size):
         end_idx = min(start_idx + micro_batch_size, batch_size)
-        
+
         # Extract microbatch
         micro_policy_log_probs = policy_log_probs[start_idx:end_idx]
         micro_response_mask = response_mask[start_idx:end_idx]
         micro_advantages = advantages[start_idx:end_idx].unsqueeze(1)  # (micro_batch, 1)
         micro_old_log_probs = old_log_probs[start_idx:end_idx] if old_log_probs is not None else None
         micro_token_entropy = token_entropy[start_idx:end_idx]
-        
+
         # Ensure gradients are enabled for microbatch
         micro_policy_log_probs.requires_grad_(True)
-        
+
         # Run microbatch train step
         loss, metadata = grpo_microbatch_train_step(
             policy_log_probs=micro_policy_log_probs,
@@ -205,31 +211,31 @@ def train_on_rollout_batch(
             old_log_probs=micro_old_log_probs,
             cliprange=config.cliprange if config.loss_type == "grpo_clip" else None,
         )
-        
+
         total_loss += loss.item()
         step_count += 1
-        
+
         # Accumulate metadata from first microbatch for logging
         if start_idx == 0:
             all_metadata = {k: v.item() if torch.is_tensor(v) else v for k, v in metadata.items()}
-            
+
         # Accumulate clip fraction if using grpo_clip
         if config.loss_type == "grpo_clip" and "clip_fraction" in metadata:
             total_clip_fraction += metadata["clip_fraction"]
-            
+
         # Accumulate token entropy
         masked_entropy = micro_token_entropy * micro_response_mask.float()
         avg_entropy = masked_entropy.sum() / micro_response_mask.sum().clamp_min(1)
         total_entropy += avg_entropy.item()
-    
+
     # Take optimizer step after accumulating gradients and capture gradient norm
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.grad_clip)
     optimizer.step()
-    
+
     avg_loss = total_loss / step_count
     avg_clip_fraction = total_clip_fraction / step_count if config.loss_type == "grpo_clip" else 0.0
     avg_entropy = total_entropy / step_count
-    
+
     return {
         "train_loss": avg_loss,
         "grad_norm": grad_norm.item(),
@@ -250,37 +256,37 @@ def run_grpo_step(
     problems: List[str],
     answers: List[str],
     config: GRPOTrainConfig,
-    vllm_model,
-    sampling_params,
+    inference_model,
     optimizer,
     device: torch.device,
     step: int,
 ) -> Dict[str, Any]:
     """
     Run a single GRPO step following Algorithm 3.
-    
+
     Returns metrics dictionary.
     """
     print(f"\n=== GRPO Step {step + 1}/{config.n_grpo_steps} ===")
-    
+
     # Sample rollout batch (Algorithm 3, Line 5)
     all_prompts, all_responses, all_ground_truths = sample_rollout_batch(
         problems=problems,
         answers=answers,
         n_prompts=config.n_prompts_per_rollout_batch,
         group_size=config.group_size,
-        vllm_model=vllm_model,
-        sampling_params=sampling_params,
+        inference_model=inference_model,
+        tokenizer=tokenizer,
+        config=config,
         seed=config.seed + step,
     )
-    
+
     # Compute rewards (Algorithm 3, Line 6)
     print("Computing rewards...")
     raw_rewards = []
     for response, ground_truth in zip(all_responses, all_ground_truths):
         reward_dict = r1_zero_reward_fn(response, ground_truth, fast=True)
         raw_rewards.append(reward_dict["reward"])
-    
+
     # Compute advantages with group normalization (Algorithm 3, Line 7)
     print("Computing group-normalized advantages...")
     advantages, raw_rewards_tensor, reward_metadata = compute_group_normalized_rewards(
@@ -293,7 +299,7 @@ def run_grpo_step(
     )
     # Ensure advantages are on the same device as the training tensors
     advantages = advantages.to(device)
-    
+
     # Get old policy log probs if needed for grpo_clip
     old_log_probs = None
     if config.loss_type == "grpo_clip":
@@ -305,7 +311,7 @@ def run_grpo_step(
         # Chunked inference for memory safety; reuse micro_train_batch_size
         chunk_size = max(1, config.micro_train_batch_size)
         old_log_probs_chunks = []
-        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             for start in range(0, input_ids_full.shape[0], chunk_size):
                 end = min(start + chunk_size, input_ids_full.shape[0])
                 old_outputs = get_response_log_probs(
@@ -316,11 +322,11 @@ def run_grpo_step(
                 )
                 old_log_probs_chunks.append(old_outputs["log_probs"].detach())
         old_log_probs = torch.cat(old_log_probs_chunks, dim=0)
-    
+
     # Training loop (Algorithm 3, Lines 8-9)
     print(f"Training for {config.epochs_per_rollout_batch} epochs...")
     epoch_metrics = []
-    
+
     for epoch in range(config.epochs_per_rollout_batch):
         epoch_metrics_dict = train_on_rollout_batch(
             model=model,
@@ -335,10 +341,10 @@ def run_grpo_step(
             all_ground_truths=all_ground_truths,
         )
         epoch_metrics.append(epoch_metrics_dict)
-    
+
     # Update old policy (Algorithm 3, Line 10 - implicitly, we'll copy weights)
     # Note: For efficiency, we update old_model at the end of each step
-    
+
     # Aggregate metrics
     metrics = {
         "step": step + 1,
@@ -348,13 +354,13 @@ def run_grpo_step(
         **reward_metadata,
         "avg_train_loss": np.mean([m["train_loss"] for m in epoch_metrics]),
     }
-    
+
     # Add first epoch's detailed metrics
     if epoch_metrics:
         for key, value in epoch_metrics[0].items():
             if key not in metrics:
                 metrics[f"epoch0_{key}"] = value
-    
+
     return metrics
 
 
@@ -364,51 +370,34 @@ def copy_model_weights(source_model, target_model):
 
 
 def evaluate_on_validation(
-    vllm_model,
+    inference_model,
+    tokenizer,
     val_problems: List[str],
     val_answers: List[str],
     config: GRPOTrainConfig,
     step: int,
 ) -> Dict[str, float]:
-    """Run evaluation on validation set using existing evaluate_vllm."""
+    """Run evaluation on validation set using plain HF generation (greedy)."""
     print("Running validation evaluation...")
-    
-    # Sample subset for evaluation (use val_samples instead of val_rollout_batch_size)
+
     n_val_samples = min(config.val_samples, len(val_problems))
     indices = random.sample(range(len(val_problems)), n_val_samples)
-    
-    val_prompts = [format_with_r1_zero_prompt(val_problems[i]) for i in indices]
-    val_ground_truths = [val_answers[i] for i in indices]
-    
-    # Create evaluation sampling params (greedy)
-    eval_sampling_params = create_sampling_params(
-        temperature=0.0,  # Greedy for evaluation
-        top_p=1.0,
-        max_tokens=config.sampling_max_tokens,
-        min_tokens=1,
-        n=1,
+
+    prompts = [format_with_r1_zero_prompt(val_problems[i]) for i in indices]
+    ground_truths = [val_answers[i] for i in indices]
+
+    responses = greedy_generate_responses(
+        inference_model=inference_model,
+        tokenizer=tokenizer,
+        prompts=prompts,
+        max_new_tokens=config.sampling_max_tokens,
     )
-    
-    # Use existing evaluate_vllm function
-    results = evaluate_vllm(
-        vllm_model=vllm_model,
-        reward_fn=r1_zero_reward_fn,
-        prompts=val_prompts,
-        ground_truths=val_ground_truths,
-        eval_sampling_params=eval_sampling_params,
-        output_dir=config.val_log_dir,
-        model_name=f"grpo_step_{step}",
-        write_results=True,
+
+    return compute_reward_metrics(
+        responses=responses,
+        ground_truths=ground_truths,
+        reward_fn=lambda r, g, fast=True: r1_zero_reward_fn(r, g, fast=fast),
     )
-    
-    overall_metrics = results.get("metadata", {}).get("overall_metrics", {})
-    total_samples = results.get("metadata", {}).get("total_samples", 0)
-    return {
-        "val_accuracy": float(overall_metrics.get("overall_accuracy", 0.0)),
-        "val_format_accuracy": float(overall_metrics.get("format_accuracy", 0.0)),
-        "val_answer_accuracy": float(overall_metrics.get("answer_accuracy", 0.0)),
-        "val_total": int(total_samples),
-    }
 
 
 def main(
@@ -416,43 +405,46 @@ def main(
     resume: str = typer.Option(None, help="Path to checkpoint to resume from")
 ):
     """GRPO (Group Relative Policy Optimisation) training for mathematical reasoning."""
-    
+
     # Load and resolve config
     config_obj = GRPOTrainConfig.from_path(config)
     config_obj.resolve()
-    
+
     print(f"GRPO Config: {config_obj}")
-    
+
     # Set random seeds
     torch.manual_seed(config_obj.seed)
     np.random.seed(config_obj.seed)
     random.seed(config_obj.seed)
-    
+
     # Setup wandb
     setup_wandb(config_obj)
-    
+
     # Load data
     print("Loading MATH dataset...")
     train_problems, train_answers, _ = load_math_train()
     val_problems, val_answers, _ = load_math_validation()
     print(f"Loaded {len(train_problems)} training problems, {len(val_problems)} validation problems")
-    
+
     # Setup models and tokenizer
     print("Setting up models...")
     model, tokenizer, device = setup_model_and_tokenizer(
         model_name=config_obj.model_name,
         train_device=config_obj.train_device,
     )
-    
+
     # Create old model copy for GRPO
     old_model = copy.deepcopy(model)
+    old_model.eval()
+    for p in old_model.parameters():
+        p.requires_grad_(False)
 
     # Optional: compile model for faster training (avoid compiling before deepcopy)
     try:
         model = torch.compile(model)
     except Exception:
         pass
-    
+
     # Setup optimizer
     optimizer = build_adamw(
         model.parameters(),
@@ -462,43 +454,33 @@ def main(
         eps=config_obj.adam_eps,
         fused=config_obj.adam_fused,
     )
-    
-    # Setup vLLM for generation
-    print("Initializing vLLM...")
-    vllm_model = init_vllm(
-        model_id=config_obj.model_name,
-        device=config_obj.eval_device,
-        seed=config_obj.seed,
-        gpu_memory_utilization=config_obj.gpu_memory_utilization,
-    )
-    
-    sampling_params = create_sampling_params(
-        temperature=config_obj.sampling_temperature,
-        top_p=config_obj.sampling_top_p,
-        max_tokens=config_obj.sampling_max_tokens,
-        min_tokens=config_obj.sampling_min_tokens,
-        n=1,  # Will be set per call
-    )
-    
+
+    # Setup a separate inference model on eval device (no hot-swapping)
+    print("Initializing inference model on eval device...")
+    eval_device = torch.device(config_obj.eval_device)
+    # Deepcopy from uncompiled clone to avoid deepcopying a compiled graph
+    inference_model = init_inference_model_from(old_model, eval_device)
+    for p in inference_model.parameters():
+        p.requires_grad_(False)
+    # Optionally compile reference and inference models for faster forward passes
+    try:
+        old_model = torch.compile(old_model)
+    except Exception:
+        pass
+    try:
+        inference_model = torch.compile(inference_model)
+    except Exception:
+        pass
+
     # Training loop
     print(f"Starting GRPO training for {config_obj.n_grpo_steps} steps...")
-    
+
     try:
         for step in range(config_obj.n_grpo_steps):
-            # GRPO Algorithm: First copy current policy to old policy (Line 4)
+            # GRPO Algorithm: First copy current policy to old policy and inference model
             copy_model_weights(model, old_model)
-            
-            # Reload vLLM from current policy checkpoint to reflect updates
-            load_policy_into_vllm_instance(
-                model,
-                vllm_model,
-                tokenizer=tokenizer,
-                eval_device=config_obj.eval_device,
-                seed=config_obj.seed + step,
-                gpu_memory_utilization=config_obj.vllm_gpu_mem_utilization,
-                tmp_dir=Path(config_obj.val_log_dir) / "_tmp_vllm_ckpt_grpo",
-            )
-            
+            copy_model_weights(model, inference_model)
+
             # Run GRPO step
             step_metrics = run_grpo_step(
                 model=model,
@@ -507,32 +489,24 @@ def main(
                 problems=train_problems,
                 answers=train_answers,
                 config=config_obj,
-                vllm_model=vllm_model,
-                sampling_params=sampling_params,
+                inference_model=inference_model,
                 optimizer=optimizer,
                 device=device,
                 step=step,
             )
-            
+
             # Log metrics
             if wandb.run is not None:
                 wandb.log(step_metrics, step=step)
             print(f"Step {step + 1} metrics: {step_metrics}")
-            
+
             # Periodic validation
             if (step + 1) % config_obj.val_every_grpo_steps == 0:
-                # Strictly reload vLLM to reflect the latest HF weights before eval
-                load_policy_into_vllm_instance(
-                    model,
-                    vllm_model,
-                    tokenizer=tokenizer,
-                    eval_device=config_obj.eval_device,
-                    seed=config_obj.seed + step,
-                    gpu_memory_utilization=config_obj.vllm_gpu_mem_utilization,
-                    tmp_dir=Path(config_obj.val_log_dir) / "_tmp_vllm_ckpt_grpo",
-                )
+                # Sync inference model with latest weights for evaluation
+                copy_model_weights(model, inference_model)
                 val_metrics = evaluate_on_validation(
-                    vllm_model=vllm_model,
+                    inference_model=inference_model,
+                    tokenizer=tokenizer,
                     val_problems=val_problems,
                     val_answers=val_answers,
                     config=config_obj,
@@ -541,21 +515,18 @@ def main(
                 if wandb.run is not None:
                     wandb.log(val_metrics, step=step)
                 print(f"Validation metrics: {val_metrics}")
-            
+
             # Periodic checkpoint saving
             if (step + 1) % config_obj.save_every_grpo_steps == 0:
                 save_path = Path(config_obj.save_dir) / f"checkpoint_step_{step + 1}"
                 save_path.mkdir(parents=True, exist_ok=True)
-                
+
                 model.save_pretrained(save_path)
                 tokenizer.save_pretrained(save_path)
                 print(f"Saved checkpoint to {save_path}")
-    
+
     finally:
         # Cleanup
-        print("Cleaning up vLLM...")
-        destroy_vllm_instance(vllm_model)
-        
         # Final save
         if config_obj.save_at_end:
             final_save_path = Path(config_obj.save_dir) / "final_model"
@@ -563,7 +534,7 @@ def main(
             model.save_pretrained(final_save_path)
             tokenizer.save_pretrained(final_save_path)
             print(f"Saved final model to {final_save_path}")
-        
+
         if wandb.run is not None:
             wandb.finish()
 
