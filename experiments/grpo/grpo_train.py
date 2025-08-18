@@ -4,49 +4,48 @@ GRPO (Group Relative Policy Optimisation) training script.
 Implements Algorithm 3 from the GRPO paper.
 """
 
+from utils.inference_utils import (
+    init_inference_model_from,
+    generate_grouped_responses,
+    greedy_generate_responses,
+    compute_reward_metrics,
+    assemble_old_log_probs,
+)
+from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
+from utils.model_utils import setup_model_and_tokenizer
+from utils.drgrpo_grader import r1_zero_reward_fn
+from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy
+from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
+from experiments.grpo.grpo_utils import (
+    compute_group_normalized_rewards,
+    grpo_microbatch_train_step
+)
+from experiments.grpo.config_schema import GRPOTrainConfig
+import typer
+import numpy as np
+import wandb
+import torch
+from datetime import datetime
+from typing import List, Dict, Tuple, Any, Optional
+import copy
+import math
+import random
+import json
+import atexit
+from pathlib import Path
+import sys
 import os
 # Set memory allocation config before any PyTorch imports
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
-import sys
-from pathlib import Path
 
 # Ensure repository root is on sys.path for absolute imports
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import atexit
-import json
-import random
-import math
-import copy
-from typing import List, Dict, Tuple, Any
-from datetime import datetime
-from pathlib import Path
 
-import torch
-import wandb
-import numpy as np
-import typer
-
-from experiments.grpo.config_schema import GRPOTrainConfig
-from experiments.grpo.grpo_utils import (
-    compute_group_normalized_rewards,
-    grpo_microbatch_train_step
-)
 # vLLM removed; we will use plain Hugging Face generation on a separate inference model/device
-from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
-from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy
-from utils.drgrpo_grader import r1_zero_reward_fn
-from utils.model_utils import setup_model_and_tokenizer
-from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
-from utils.inference_utils import (
-    init_inference_model_from,
-    generate_grouped_responses,
-    greedy_generate_responses,
-    compute_reward_metrics,
-)
 
 
 def setup_wandb(config: GRPOTrainConfig):
@@ -66,7 +65,8 @@ def setup_wandb(config: GRPOTrainConfig):
         config=config.__dict__,
         save_code=True,
     )
-    print(f"Initialized wandb: project={resolved_project}, entity={resolved_entity}")
+    print(
+        f"Initialized wandb: project={resolved_project}, entity={resolved_entity}")
 
 
 def sample_rollout_batch(
@@ -78,29 +78,35 @@ def sample_rollout_batch(
     tokenizer,
     config: GRPOTrainConfig,
     seed: int = None,
-) -> Tuple[List[str], List[str], List[str]]:
+    use_output_scores: bool = False,
+    stop_strings: Optional[List[str]] = None,
+) -> Tuple[List[str], List[str], List[str], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     Sample a rollout batch: n_prompts questions, each with group_size responses.
 
     Returns:
-        Tuple of (all_prompts, all_responses, all_ground_truths) where each list
-        has length n_prompts * group_size
+        Tuple of (all_prompts, all_responses, all_ground_truths, old_logprobs_matrix, gen_lens)
+        where the first three lists have length n_prompts * group_size, and the last two
+        tensors are optional (only present when use_output_scores=True).
     """
     if seed is not None:
         random.seed(seed)
 
     # Sample n_prompts questions
-    indices = random.sample(range(len(problems)), min(n_prompts, len(problems)))
+    indices = random.sample(range(len(problems)),
+                            min(n_prompts, len(problems)))
     sampled_problems = [problems[i] for i in indices]
     sampled_answers = [answers[i] for i in indices]
 
     # Format prompts with r1_zero format
-    prompts = [format_with_r1_zero_prompt(problem) for problem in sampled_problems]
+    prompts = [format_with_r1_zero_prompt(
+        problem) for problem in sampled_problems]
 
-    print(f"Generating rollout batch: {n_prompts} prompts × {group_size} responses = {n_prompts * group_size} total")
+    print(
+        f"Generating rollout batch: {n_prompts} prompts × {group_size} responses = {n_prompts * group_size} total")
 
     # Generate grouped responses via utility
-    responses = generate_grouped_responses(
+    responses_out = generate_grouped_responses(
         inference_model=inference_model,
         tokenizer=tokenizer,
         prompts=prompts,
@@ -109,7 +115,15 @@ def sample_rollout_batch(
         min_new_tokens=getattr(config, "sampling_min_tokens", 0),
         sampling_temperature=config.sampling_temperature,
         sampling_top_p=config.sampling_top_p,
+        stop_strings=stop_strings,
+        return_scores=use_output_scores,
     )
+    old_logprobs_matrix: Optional[torch.Tensor] = None
+    gen_lens: Optional[torch.Tensor] = None
+    if use_output_scores:
+        responses, old_logprobs_matrix, gen_lens = responses_out
+    else:
+        responses = responses_out
 
     # Build flattened results aligned with responses
     all_prompts: List[str] = []
@@ -122,7 +136,7 @@ def sample_rollout_batch(
             all_ground_truths.append(answer)
 
     print(f"Generated {len(all_responses)} responses total")
-    return all_prompts, all_responses, all_ground_truths
+    return all_prompts, all_responses, all_ground_truths, old_logprobs_matrix, gen_lens
 
 
 def train_on_rollout_batch(
@@ -145,7 +159,8 @@ def train_on_rollout_batch(
     model.train()
 
     # Tokenize all prompt-response pairs
-    tokenized = tokenize_prompt_and_output(all_prompts, all_responses, tokenizer)
+    tokenized = tokenize_prompt_and_output(
+        all_prompts, all_responses, tokenizer)
     input_ids = tokenized["input_ids"].to(device)
     labels = tokenized["labels"].to(device)
     response_mask = tokenized["response_mask"].to(device)
@@ -193,8 +208,10 @@ def train_on_rollout_batch(
         # Extract microbatch
         micro_policy_log_probs = policy_log_probs[start_idx:end_idx]
         micro_response_mask = response_mask[start_idx:end_idx]
-        micro_advantages = advantages[start_idx:end_idx].unsqueeze(1)  # (micro_batch, 1)
-        micro_old_log_probs = old_log_probs[start_idx:end_idx] if old_log_probs is not None else None
+        micro_advantages = advantages[start_idx:end_idx].unsqueeze(
+            1)  # (micro_batch, 1)
+        micro_old_log_probs = old_log_probs[start_idx:
+                                            end_idx] if old_log_probs is not None else None
         micro_token_entropy = token_entropy[start_idx:end_idx]
 
         # Ensure gradients are enabled for microbatch
@@ -217,7 +234,8 @@ def train_on_rollout_batch(
 
         # Accumulate metadata from first microbatch for logging
         if start_idx == 0:
-            all_metadata = {k: v.item() if torch.is_tensor(v) else v for k, v in metadata.items()}
+            all_metadata = {k: v.item() if torch.is_tensor(
+                v) else v for k, v in metadata.items()}
 
         # Accumulate clip fraction if using grpo_clip
         if config.loss_type == "grpo_clip" and "clip_fraction" in metadata:
@@ -229,11 +247,13 @@ def train_on_rollout_batch(
         total_entropy += avg_entropy.item()
 
     # Take optimizer step after accumulating gradients and capture gradient norm
-    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.grad_clip)
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        model.parameters(), max_norm=config.grad_clip)
     optimizer.step()
 
     avg_loss = total_loss / step_count
-    avg_clip_fraction = total_clip_fraction / step_count if config.loss_type == "grpo_clip" else 0.0
+    avg_clip_fraction = total_clip_fraction / \
+        step_count if config.loss_type == "grpo_clip" else 0.0
     avg_entropy = total_entropy / step_count
 
     return {
@@ -252,7 +272,6 @@ def train_on_rollout_batch(
 def run_grpo_step(
     model,
     tokenizer,
-    old_model,
     problems: List[str],
     answers: List[str],
     config: GRPOTrainConfig,
@@ -269,7 +288,9 @@ def run_grpo_step(
     print(f"\n=== GRPO Step {step + 1}/{config.n_grpo_steps} ===")
 
     # Sample rollout batch (Algorithm 3, Line 5)
-    all_prompts, all_responses, all_ground_truths = sample_rollout_batch(
+    use_output_scores = (config.loss_type == "grpo_clip")
+    stop_strings = ["</answer>"] if hasattr(config, "use_answer_stop") and config.use_answer_stop else None
+    all_prompts, all_responses, all_ground_truths, old_logprobs_matrix, gen_lens = sample_rollout_batch(
         problems=problems,
         answers=answers,
         n_prompts=config.n_prompts_per_rollout_batch,
@@ -278,6 +299,8 @@ def run_grpo_step(
         tokenizer=tokenizer,
         config=config,
         seed=config.seed + step,
+        use_output_scores=use_output_scores,
+        stop_strings=stop_strings,
     )
 
     # Compute rewards (Algorithm 3, Line 6)
@@ -302,26 +325,20 @@ def run_grpo_step(
 
     # Get old policy log probs if needed for grpo_clip
     old_log_probs = None
-    if config.loss_type == "grpo_clip":
-        print("Computing old policy log probs...")
-        tokenized = tokenize_prompt_and_output(all_prompts, all_responses, tokenizer)
-        input_ids_full = tokenized["input_ids"].to(device)
-        labels_full = tokenized["labels"].to(device)
+    if config.loss_type == "grpo_clip" and old_logprobs_matrix is not None:
+        # Build old_log_probs tensor from vectorized logprobs_matrix aligned to response spans
+        tokenized = tokenize_prompt_and_output(
+            all_prompts, all_responses, tokenizer)
+        labels = tokenized["labels"].to(device)
+        response_mask = tokenized["response_mask"].to(device)
 
-        # Chunked inference for memory safety; reuse micro_train_batch_size
-        chunk_size = max(1, config.micro_train_batch_size)
-        old_log_probs_chunks = []
-        with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            for start in range(0, input_ids_full.shape[0], chunk_size):
-                end = min(start + chunk_size, input_ids_full.shape[0])
-                old_outputs = get_response_log_probs(
-                    model=old_model,
-                    input_ids=input_ids_full[start:end],
-                    labels=labels_full[start:end],
-                    return_token_entropy=False
-                )
-                old_log_probs_chunks.append(old_outputs["log_probs"].detach())
-        old_log_probs = torch.cat(old_log_probs_chunks, dim=0)
+        old_lp = assemble_old_log_probs(
+            logprobs_matrix=old_logprobs_matrix,
+            gen_lens=gen_lens,
+            response_mask=response_mask,
+            labels=labels,
+        )
+        old_log_probs = old_lp.to(device).detach()
 
     # Training loop (Algorithm 3, Lines 8-9)
     print(f"Training for {config.epochs_per_rollout_batch} epochs...")
@@ -424,7 +441,8 @@ def main(
     print("Loading MATH dataset...")
     train_problems, train_answers, _ = load_math_train()
     val_problems, val_answers, _ = load_math_validation()
-    print(f"Loaded {len(train_problems)} training problems, {len(val_problems)} validation problems")
+    print(
+        f"Loaded {len(train_problems)} training problems, {len(val_problems)} validation problems")
 
     # Setup models and tokenizer
     print("Setting up models...")
@@ -433,13 +451,20 @@ def main(
         train_device=config_obj.train_device,
     )
 
-    # Create old model copy for GRPO
-    old_model = copy.deepcopy(model)
-    old_model.eval()
-    for p in old_model.parameters():
+    # Setup a separate inference model on eval device (no hot-swapping)
+    print("Initializing inference model on eval device...")
+    eval_device = torch.device(config_obj.eval_device)
+    # Initialize inference/reference model from the uncompiled training model
+    inference_model = init_inference_model_from(model, eval_device)
+    for p in inference_model.parameters():
         p.requires_grad_(False)
+    # Optionally compile inference model for faster forward passes
+    try:
+        inference_model = torch.compile(inference_model)
+    except Exception:
+        pass
 
-    # Optional: compile model for faster training (avoid compiling before deepcopy)
+    # Optional: compile model for faster training (compile after creating inference copy)
     try:
         model = torch.compile(model)
     except Exception:
@@ -455,37 +480,18 @@ def main(
         fused=config_obj.adam_fused,
     )
 
-    # Setup a separate inference model on eval device (no hot-swapping)
-    print("Initializing inference model on eval device...")
-    eval_device = torch.device(config_obj.eval_device)
-    # Deepcopy from uncompiled clone to avoid deepcopying a compiled graph
-    inference_model = init_inference_model_from(old_model, eval_device)
-    for p in inference_model.parameters():
-        p.requires_grad_(False)
-    # Optionally compile reference and inference models for faster forward passes
-    try:
-        old_model = torch.compile(old_model)
-    except Exception:
-        pass
-    try:
-        inference_model = torch.compile(inference_model)
-    except Exception:
-        pass
-
     # Training loop
     print(f"Starting GRPO training for {config_obj.n_grpo_steps} steps...")
 
     try:
         for step in range(config_obj.n_grpo_steps):
-            # GRPO Algorithm: First copy current policy to old policy and inference model
-            copy_model_weights(model, old_model)
+            # GRPO Algorithm: First copy current policy to reference (inference) model
             copy_model_weights(model, inference_model)
 
             # Run GRPO step
             step_metrics = run_grpo_step(
                 model=model,
                 tokenizer=tokenizer,
-                old_model=old_model,
                 problems=train_problems,
                 answers=train_answers,
                 config=config_obj,
@@ -518,7 +524,8 @@ def main(
 
             # Periodic checkpoint saving
             if (step + 1) % config_obj.save_every_grpo_steps == 0:
-                save_path = Path(config_obj.save_dir) / f"checkpoint_step_{step + 1}"
+                save_path = Path(config_obj.save_dir) / \
+                    f"checkpoint_step_{step + 1}"
                 save_path.mkdir(parents=True, exist_ok=True)
 
                 model.save_pretrained(save_path)
