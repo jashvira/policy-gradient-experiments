@@ -36,6 +36,12 @@ class GRPOTrainConfig(BaseTrainConfig):
     advantage_eps: float = 1e-6
     cliprange: float = 0.2  # For grpo_clip loss type
     
+    # Numerical precision and consistency settings
+    compute_dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
+    enforce_dtype_consistency: bool = True
+    use_deterministic_algorithms: bool = False
+    entropy_eps: float = 1e-8  # Epsilon for numerical stability in entropy computation
+    
     # Override base config with GRPO-appropriate values
     learning_rate: float = 1e-5  # Lower learning rate for RL
     lr: float = 1e-5  # Alias for learning_rate
@@ -59,6 +65,17 @@ class GRPOTrainConfig(BaseTrainConfig):
     # Override project name for GRPO
     project: str = "grpo-math"
     run_name: str = "grpo-run"
+    
+    @property
+    def torch_dtype(self) -> "torch.dtype":
+        """Get PyTorch dtype from string configuration."""
+        import torch
+        dtype_map = {
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+        }
+        return dtype_map[self.compute_dtype]
     
     def resolve(self, repo_root: Optional[Path] = None) -> "GRPOTrainConfig":
         """Fill GRPO-specific defaults after construction."""

@@ -3,15 +3,15 @@
 
 # GRPO algorithm parameters
 n_grpo_steps: 200
-rollout_batch_size: 256
-group_size: 8
-train_batch_size: 256  # On-policy: equals rollout_batch_size
+rollout_batch_size: 32
+group_size: 4
+train_batch_size: 32  # On-policy: equals rollout_batch_size
 epochs_per_rollout_batch: 1
 
 # Generation/sampling
 sampling_temperature: 1.0
 sampling_min_tokens: 4
-sampling_max_tokens: 1024
+sampling_max_tokens: 512
 sampling_top_p: 1.0
 
 # Loss configuration
@@ -23,7 +23,7 @@ cliprange: 0.2  # For grpo_clip loss type
 # Optimization
 learning_rate: 1.0e-5
 lr: 1.0e-5
-gradient_accumulation_steps: 128  # microbatch size is 2, will fit on H100
+gradient_accumulation_steps: 16  # microbatch size is 2, will fit on H100
 weight_decay: 0.0
 adam_beta1: 0.9
 adam_beta2: 0.95
