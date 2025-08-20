@@ -35,14 +35,54 @@ import atexit
 from pathlib import Path
 import sys
 import os
-# Set memory allocation config before any PyTorch imports
+# Set memory allocation config and logging options before any PyTorch imports
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+# Reduce verbose PyTorch logging and error verbosity
+os.environ.setdefault('TORCH_LOGS', '')  # Disable verbose torch logs
+os.environ.setdefault('PYTORCH_DISABLE_STACK_TRACE', '1')  # Reduce stack trace verbosity
 
 
 # Ensure repository root is on sys.path for absolute imports
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+
+# Suppress massive tensor dumps in error messages to keep logs clean
+def suppress_large_tensor_repr():
+    """Prevent massive tensor dumps in error messages to keep logs clean."""
+    # Store originals
+    original_tensor_repr = torch.Tensor.__repr__
+    original_tensor_str = torch.Tensor.__str__
+    
+    def clean_tensor_repr(self):
+        if self.numel() > 10:  # Smaller threshold
+            shape_str = "x".join(map(str, self.shape))
+            return f"tensor({shape_str}, dtype={self.dtype}, device={self.device})"
+        return original_tensor_repr(self)
+    
+    def clean_tensor_str(self):
+        if self.numel() > 10:
+            shape_str = "x".join(map(str, self.shape))
+            return f"tensor({shape_str}, dtype={self.dtype}, device={self.device})"
+        return original_tensor_str(self)
+    
+    # Override both repr and str methods
+    torch.Tensor.__repr__ = clean_tensor_repr
+    torch.Tensor.__str__ = clean_tensor_str
+    
+    # Note: numpy arrays are immutable types, so we can't patch them
+    # but torch tensor patching is sufficient for our use case
+
+# Set up clean logging once at module level
+suppress_large_tensor_repr()
+
+# Configure cleaner error handling and warnings
+import warnings
+# Filter out common but non-critical warnings that clutter logs
+warnings.filterwarnings('ignore', message='.*TensorFloat32.*')
+warnings.filterwarnings('ignore', message='.*flash_attention.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='torch._inductor.*')
 
 
 # vLLM removed; we will use plain Hugging Face generation on a separate inference model/device
@@ -136,6 +176,11 @@ def sample_rollout_batch(
             all_ground_truths.append(answer)
 
     print(f"Generated {len(all_responses)} responses total")
+    
+    # Clean up CUDA cache after generation to reduce memory fragmentation
+    from utils.memory_utils import cleanup_cuda_cache, get_model_device
+    cleanup_cuda_cache(device=get_model_device(inference_model))
+
     return all_prompts, all_responses, all_ground_truths, old_logprobs_matrix, gen_lens
 
 
@@ -165,22 +210,18 @@ def train_on_rollout_batch(
     labels = tokenized["labels"].to(device)
     response_mask = tokenized["response_mask"].to(device)
 
-    # Get current policy log probs and token entropy under autocast
-    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+    # Get current policy log probs under autocast (no token entropy for memory safety)
+    with torch.autocast(device_type=device.type, dtype=config.torch_dtype):
         policy_outputs = get_response_log_probs(
             model=model,
             input_ids=input_ids,
             labels=labels,
-            return_token_entropy=True
+            return_token_entropy=False,
         )
     policy_log_probs = policy_outputs["log_probs"]
 
-    # Compute token entropy if not returned by get_response_log_probs
-    token_entropy = policy_outputs.get("token_entropy")
-    if token_entropy is None:
-        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            logits = model(input_ids).logits
-            token_entropy = compute_entropy(logits)
+    # Skip computing token entropy for now to avoid BxSxV allocations
+    token_entropy = torch.zeros_like(policy_log_probs)
 
     # Compute train rewards for logging
     train_rewards = {"format": [], "answer": [], "total": []}
@@ -285,7 +326,10 @@ def run_grpo_step(
 
     Returns metrics dictionary.
     """
+    from utils.memory_utils import log_all_gpu_memory
+    
     print(f"\n=== GRPO Step {step + 1}/{config.n_grpo_steps} ===")
+    log_all_gpu_memory(f"Step {step + 1} - Start")
 
     # Sample rollout batch (Algorithm 3, Line 5)
     use_output_scores = (config.loss_type == "grpo_clip")
@@ -302,6 +346,7 @@ def run_grpo_step(
         use_output_scores=use_output_scores,
         stop_strings=stop_strings,
     )
+    log_all_gpu_memory(f"Step {step + 1} - After Rollout")
 
     # Compute rewards (Algorithm 3, Line 6)
     print("Computing rewards...")
@@ -319,9 +364,11 @@ def run_grpo_step(
         group_size=config.group_size,
         advantage_eps=config.advantage_eps,
         normalize_by_std=config.use_std_normalization,
+        dtype=config.torch_dtype,
     )
-    # Ensure advantages are on the same device as the training tensors
-    advantages = advantages.to(device)
+    # Ensure advantages are on the same device and dtype as the training tensors
+    advantages = advantages.to(device=device, dtype=config.torch_dtype)
+    log_all_gpu_memory(f"Step {step + 1} - After Advantages")
 
     # Get old policy log probs if needed for grpo_clip
     old_log_probs = None
@@ -337,8 +384,9 @@ def run_grpo_step(
             gen_lens=gen_lens,
             response_mask=response_mask,
             labels=labels,
+            dtype=config.torch_dtype,
         )
-        old_log_probs = old_lp.to(device).detach()
+        old_log_probs = old_lp.to(device=device, dtype=config.torch_dtype).detach()
 
     # Training loop (Algorithm 3, Lines 8-9)
     print(f"Training for {config.epochs_per_rollout_batch} epochs...")
@@ -358,6 +406,8 @@ def run_grpo_step(
             all_ground_truths=all_ground_truths,
         )
         epoch_metrics.append(epoch_metrics_dict)
+    
+    log_all_gpu_memory(f"Step {step + 1} - After Training")
 
     # Update old policy (Algorithm 3, Line 10 - implicitly, we'll copy weights)
     # Note: For efficiency, we update old_model at the end of each step
@@ -378,6 +428,7 @@ def run_grpo_step(
             if key not in metrics:
                 metrics[f"epoch0_{key}"] = value
 
+    log_all_gpu_memory(f"Step {step + 1} - End")
     return metrics
 
 
@@ -395,7 +446,10 @@ def evaluate_on_validation(
     step: int,
 ) -> Dict[str, float]:
     """Run evaluation on validation set using plain HF generation (greedy)."""
+    from utils.memory_utils import log_all_gpu_memory
+    
     print("Running validation evaluation...")
+    log_all_gpu_memory(f"Validation Step {step + 1} - Start")
 
     n_val_samples = min(config.val_samples, len(val_problems))
     indices = random.sample(range(len(val_problems)), n_val_samples)
@@ -410,11 +464,18 @@ def evaluate_on_validation(
         max_new_tokens=config.sampling_max_tokens,
     )
 
-    return compute_reward_metrics(
+    metrics = compute_reward_metrics(
         responses=responses,
         ground_truths=ground_truths,
         reward_fn=lambda r, g, fast=True: r1_zero_reward_fn(r, g, fast=fast),
     )
+
+    # Clean up CUDA cache after validation to reduce memory fragmentation
+    from utils.memory_utils import cleanup_cuda_cache, get_model_device
+    cleanup_cuda_cache(device=get_model_device(inference_model))
+    
+    log_all_gpu_memory(f"Validation Step {step + 1} - End")
+    return metrics
 
 
 def main(
@@ -449,6 +510,7 @@ def main(
     model, tokenizer, device = setup_model_and_tokenizer(
         model_name=config_obj.model_name,
         train_device=config_obj.train_device,
+        torch_dtype=config_obj.torch_dtype,
     )
 
     # Setup a separate inference model on eval device (no hot-swapping)
@@ -469,6 +531,10 @@ def main(
         model = torch.compile(model)
     except Exception:
         pass
+    
+    # Log memory after model setup
+    from utils.memory_utils import log_all_gpu_memory
+    log_all_gpu_memory("After Model Setup")
 
     # Setup optimizer
     optimizer = build_adamw(
@@ -482,6 +548,11 @@ def main(
 
     # Training loop
     print(f"Starting GRPO training for {config_obj.n_grpo_steps} steps...")
+    
+    # Log initial memory state and reset peak stats
+    from utils.memory_utils import log_all_gpu_memory, reset_peak_memory_stats
+    reset_peak_memory_stats()
+    log_all_gpu_memory("Training Start")
 
     try:
         for step in range(config_obj.n_grpo_steps):
