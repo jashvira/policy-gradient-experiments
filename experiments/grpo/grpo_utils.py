@@ -26,6 +26,7 @@ def compute_group_normalized_rewards(
     group_size: int,
     advantage_eps: float,
     normalize_by_std: bool,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """
     Compute rewards for each group of rollout responses, normalized by the group size.
@@ -76,8 +77,8 @@ def compute_group_normalized_rewards(
         reward_dict = reward_fn(response, ground_truth)
         raw_rewards_list.append(reward_dict["reward"])
     
-    # Convert to tensor
-    raw_rewards = torch.tensor(raw_rewards_list, dtype=torch.float32)
+    # Convert to tensor with specified dtype
+    raw_rewards = torch.tensor(raw_rewards_list, dtype=dtype)
     
     # Reshape to groups: (n_groups, group_size)  
     n_groups = rollout_batch_size // group_size
