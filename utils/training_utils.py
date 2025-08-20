@@ -13,13 +13,14 @@ from datetime import datetime
 import json
 
 
-def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+def compute_entropy(logits: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """Compute per-token entropy from unnormalized logits in a numerically
     stable way using logsumexp.
 
     Args:
         logits: torch.Tensor of shape (batch_size, sequence_length, vocab_size)
             containing unnormalized logits.
+        eps: Small epsilon for numerical stability.
 
     Returns:
         torch.Tensor of shape (batch_size, sequence_length) with the entropy
@@ -28,7 +29,9 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     normalization_term = torch.logsumexp(logits, dim=-1, keepdim=True)
     log_probs = logits - normalization_term
     probs = log_probs.exp()
-    return -(probs * log_probs).sum(dim=-1)
+    # Add epsilon to prevent log(0) in case of numerical precision issues
+    stable_log_probs = torch.clamp(log_probs, min=torch.log(torch.tensor(eps, device=logits.device, dtype=logits.dtype)))
+    return -(probs * stable_log_probs).sum(dim=-1)
 
 
 def masked_normalize(
@@ -155,11 +158,11 @@ def get_response_log_probs(
         logits = model(
             input_ids, attention_mask=attention_mask).logits  # (B, S, V)
 
-    # Compute log-probs over vocabulary and gather per-position label log-prob
-    log_probs_vocab = F.log_softmax(logits, dim=-1)  # (B, S, V)
-    per_token_log_probs = torch.gather(
-        log_probs_vocab, dim=-1, index=labels.unsqueeze(-1)
-    ).squeeze(-1)  # (B, S)
+    # Memory-light per-token log-prob: log_softmax = logits - logsumexp(logits)
+    # Avoids materializing the (B, S, V) log-prob tensor
+    normalization_term = torch.logsumexp(logits, dim=-1, keepdim=True)  # (B, S, 1)
+    selected_logits = logits.gather(-1, labels.unsqueeze(-1)).squeeze(-1)  # (B, S)
+    per_token_log_probs = selected_logits - normalization_term.squeeze(-1)  # (B, S)
 
     result: dict[str, torch.Tensor] = {"log_probs": per_token_log_probs}
 
