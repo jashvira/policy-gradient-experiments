@@ -234,6 +234,7 @@ def assemble_old_log_probs(
     gen_lens: torch.Tensor,         # (B,)
     response_mask: torch.Tensor,    # (B, S)
     labels: torch.Tensor,           # (B, S)
+    dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """Vectorized alignment of generated-token logprobs to label positions.
 
@@ -255,7 +256,7 @@ def assemble_old_log_probs(
     # Corresponding time indices in [0, T)
     t_vals = order_idx[rows, cols].clamp_min(0)
 
-    old_lp = torch.zeros_like(labels, dtype=torch.float32, device=device)
+    old_lp = torch.zeros_like(labels, dtype=dtype, device=device)
     values = logprobs_matrix.to(device)[rows, t_vals]
     old_lp[rows, cols] = values
     return old_lp
