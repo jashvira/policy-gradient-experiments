@@ -25,6 +25,29 @@ def setup_model_and_tokenizer(
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    # For decoder-only architectures, ensure left padding to avoid HF warnings
+    # and to keep prompt tokens aligned at the right side during generation.
+    try:
+        tokenizer.padding_side = "left"
+        tokenizer.truncation_side = "left"
+    except Exception:
+        # Some tokenizers may not expose these attributes; ignore safely
+        pass
+
+    # Ensure a valid pad token id is set; fall back to eos if needed
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        try:
+            tokenizer.pad_token = tokenizer.eos_token
+        except Exception:
+            pass
+
+    # Align model config with tokenizer pad token id when possible
+    try:
+        if getattr(model.config, "pad_token_id", None) is None and getattr(tokenizer, "pad_token_id", None) is not None:
+            model.config.pad_token_id = tokenizer.pad_token_id
+    except Exception:
+        pass
+
     return model, tokenizer, device
 
 
