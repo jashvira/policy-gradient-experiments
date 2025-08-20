@@ -38,7 +38,8 @@ import os
 # Set memory allocation config and logging options before any PyTorch imports
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 # Reduce verbose PyTorch logging and error verbosity
-os.environ.setdefault('TORCH_LOGS', '')  # Disable verbose torch logs
+# Use valid TORCH_LOGS syntax: optional +/- prefix, no equals. "-inductor" => ERROR level.
+os.environ.setdefault('TORCH_LOGS', '-inductor')  # Quiet inductor logs and avoid empty string bug
 os.environ.setdefault('PYTORCH_DISABLE_STACK_TRACE', '1')  # Reduce stack trace verbosity
 
 
@@ -48,29 +49,41 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
-# Suppress massive tensor dumps in error messages to keep logs clean
+# Suppress massive tensor dumps and model architecture in error messages to keep logs clean
 def suppress_large_tensor_repr():
-    """Prevent massive tensor dumps in error messages to keep logs clean."""
+    """Prevent massive tensor dumps and verbose model architecture in error messages to keep logs clean."""
     # Store originals
     original_tensor_repr = torch.Tensor.__repr__
     original_tensor_str = torch.Tensor.__str__
-    
+    original_module_repr = torch.nn.Module.__repr__
+
     def clean_tensor_repr(self):
         if self.numel() > 10:  # Smaller threshold
             shape_str = "x".join(map(str, self.shape))
             return f"tensor({shape_str}, dtype={self.dtype}, device={self.device})"
         return original_tensor_repr(self)
-    
+
     def clean_tensor_str(self):
         if self.numel() > 10:
             shape_str = "x".join(map(str, self.shape))
             return f"tensor({shape_str}, dtype={self.dtype}, device={self.device})"
         return original_tensor_str(self)
-    
+
+    def clean_module_repr(self):
+        """Show just class name instead of full architecture for large models."""
+        class_name = self.__class__.__name__
+        # For large models, just show the class name
+        if hasattr(self, 'config') and hasattr(self.config, 'num_hidden_layers'):
+            return f"{class_name}(layers={self.config.num_hidden_layers})"
+        elif len(list(self.parameters())) > 100:  # Large model heuristic
+            return f"{class_name}(...)"
+        return original_module_repr(self)
+
     # Override both repr and str methods
     torch.Tensor.__repr__ = clean_tensor_repr
     torch.Tensor.__str__ = clean_tensor_str
-    
+    torch.nn.Module.__repr__ = clean_module_repr
+
     # Note: numpy arrays are immutable types, so we can't patch them
     # but torch tensor patching is sufficient for our use case
 
@@ -176,7 +189,7 @@ def sample_rollout_batch(
             all_ground_truths.append(answer)
 
     print(f"Generated {len(all_responses)} responses total")
-    
+
     # Clean up CUDA cache after generation to reduce memory fragmentation
     from utils.memory_utils import cleanup_cuda_cache, get_model_device
     cleanup_cuda_cache(device=get_model_device(inference_model))
@@ -327,7 +340,7 @@ def run_grpo_step(
     Returns metrics dictionary.
     """
     from utils.memory_utils import log_all_gpu_memory
-    
+
     print(f"\n=== GRPO Step {step + 1}/{config.n_grpo_steps} ===")
     log_all_gpu_memory(f"Step {step + 1} - Start")
 
@@ -406,7 +419,7 @@ def run_grpo_step(
             all_ground_truths=all_ground_truths,
         )
         epoch_metrics.append(epoch_metrics_dict)
-    
+
     log_all_gpu_memory(f"Step {step + 1} - After Training")
 
     # Update old policy (Algorithm 3, Line 10 - implicitly, we'll copy weights)
@@ -429,12 +442,55 @@ def run_grpo_step(
                 metrics[f"epoch0_{key}"] = value
 
     log_all_gpu_memory(f"Step {step + 1} - End")
+
+    # Add memory stats to metrics for all GPUs
+    from utils.memory_utils import log_gpu_memory_with_roles
+    log_gpu_memory_with_roles(device, inference_model, metrics)
+
     return metrics
 
 
 def copy_model_weights(source_model, target_model):
-    """Copy weights from source_model to target_model."""
-    target_model.load_state_dict(source_model.state_dict())
+    """
+    Copy weights from `source_model` to `target_model` in-place.
+
+    This implementation avoids constructing large intermediate tensors on the
+    destination device (GPU1) by performing parameter-wise device-to-device
+    copies into the existing storages of `target_model`. This greatly reduces
+    peak memory usage compared to calling `load_state_dict` on a full
+    state_dict when models live on different GPUs.
+    """
+    import torch
+
+    # Fast path: parameter-wise copy with no gradient tracking
+    with torch.no_grad():
+        # Build lookups for source parameters and buffers by name
+        src_params = dict(source_model.named_parameters())
+        src_buffers = dict(source_model.named_buffers())
+
+        # Copy parameters
+        for name, tgt_param in target_model.named_parameters():
+            src_param = src_params.get(name, None)
+            if src_param is None:
+                continue  # Skip unexpected/missing entries safely
+            # Copy directly into the existing storage on the target device
+            tgt_param.detach().copy_(src_param.detach(), non_blocking=True)
+
+        # Copy buffers (e.g., running stats)
+        for name, tgt_buf in target_model.named_buffers():
+            src_buf = src_buffers.get(name, None)
+            if src_buf is None:
+                continue
+            tgt_buf.detach().copy_(src_buf.detach(), non_blocking=True)
+
+    # Optional: help the allocator by clearing small, now-unused temps
+    try:
+        if torch.cuda.is_available():
+            # Synchronize target device to finalize copies before cleanup
+            torch.cuda.synchronize(device=next(target_model.parameters()).device)
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def evaluate_on_validation(
@@ -446,9 +502,8 @@ def evaluate_on_validation(
     step: int,
 ) -> Dict[str, float]:
     """Run evaluation on validation set using plain HF generation (greedy)."""
-    from utils.memory_utils import log_all_gpu_memory
-    
-    print("Running validation evaluation...")
+    from utils.memory_utils import log_all_gpu_memory, cleanup_cuda_cache, get_model_device
+
     log_all_gpu_memory(f"Validation Step {step + 1} - Start")
 
     n_val_samples = min(config.val_samples, len(val_problems))
@@ -457,23 +512,35 @@ def evaluate_on_validation(
     prompts = [format_with_r1_zero_prompt(val_problems[i]) for i in indices]
     ground_truths = [val_answers[i] for i in indices]
 
-    responses = greedy_generate_responses(
-        inference_model=inference_model,
-        tokenizer=tokenizer,
-        prompts=prompts,
-        max_new_tokens=config.sampling_max_tokens,
+    # Batched generation to cap KV-cache + logits memory on eval device
+    batch_size = max(1, getattr(config, "val_rollout_batch_size", 64))
+    print(
+        f"Generating responses for {n_val_samples} validation samples (batch_size={batch_size})..."
     )
+    responses: List[str] = []
+    for start_idx in range(0, len(prompts), batch_size):
+        end_idx = min(start_idx + batch_size, len(prompts))
+        batch_prompts = prompts[start_idx:end_idx]
+        batch_responses = greedy_generate_responses(
+            inference_model=inference_model,
+            tokenizer=tokenizer,
+            prompts=batch_prompts,
+            max_new_tokens=config.sampling_max_tokens,
+        )
+        responses.extend(batch_responses)
+        # Trim allocator fragmentation between batches
+        cleanup_cuda_cache(device=get_model_device(inference_model))
 
+    print("Computing validation metrics...")
     metrics = compute_reward_metrics(
         responses=responses,
         ground_truths=ground_truths,
         reward_fn=lambda r, g, fast=True: r1_zero_reward_fn(r, g, fast=fast),
     )
 
-    # Clean up CUDA cache after validation to reduce memory fragmentation
-    from utils.memory_utils import cleanup_cuda_cache, get_model_device
+    # Final cleanup after validation to reduce memory fragmentation
     cleanup_cuda_cache(device=get_model_device(inference_model))
-    
+
     log_all_gpu_memory(f"Validation Step {step + 1} - End")
     return metrics
 
@@ -531,7 +598,7 @@ def main(
         model = torch.compile(model)
     except Exception:
         pass
-    
+
     # Log memory after model setup
     from utils.memory_utils import log_all_gpu_memory
     log_all_gpu_memory("After Model Setup")
@@ -548,7 +615,7 @@ def main(
 
     # Training loop
     print(f"Starting GRPO training for {config_obj.n_grpo_steps} steps...")
-    
+
     # Log initial memory state and reset peak stats
     from utils.memory_utils import log_all_gpu_memory, reset_peak_memory_stats
     reset_peak_memory_stats()
@@ -579,6 +646,7 @@ def main(
 
             # Periodic validation
             if (step + 1) % config_obj.val_every_grpo_steps == 0:
+                print("Running validation evaluation...")
                 # Sync inference model with latest weights for evaluation
                 copy_model_weights(model, inference_model)
                 val_metrics = evaluate_on_validation(
