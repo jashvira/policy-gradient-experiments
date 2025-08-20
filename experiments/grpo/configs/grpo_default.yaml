@@ -4,7 +4,7 @@
 # GRPO algorithm parameters
 n_grpo_steps: 200
 rollout_batch_size: 32
-group_size: 4
+group_size: 8
 train_batch_size: 32  # On-policy: equals rollout_batch_size
 epochs_per_rollout_batch: 1
 

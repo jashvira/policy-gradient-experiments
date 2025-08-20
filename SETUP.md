@@ -78,10 +78,21 @@ print(f'Model on {device}, Flash Attention: {getattr(model.config, \"_attn_imple
 # Expected output: Model on cuda:0, Flash Attention: flash_attention_2
 ```
 
+
+## 7. Development Tools (Recommended)
+
+```bash
+# Install Cursor extensions
+code --install-extension ms-python.python
+code --install-extension ms-python.vscode-pylance
+# Install official Anthropic Claude Code CLI
+sudo npm install -g @anthropic-ai/claude-code
+```
+
 ## Troubleshooting
 
 **If Flash Attention installation fails:**
-1. Ensure torch is installed first: `uv pip install torch==2.7.1`  
+1. Ensure torch is installed first: `uv pip install torch==2.7.1`
 2. Clear any cached builds: `uv cache clean`
 3. Try installing with verbose output: `uv pip install -v --no-build-isolation flash-attn==2.8.0.post2`
 

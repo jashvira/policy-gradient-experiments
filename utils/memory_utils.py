@@ -138,3 +138,29 @@ def reset_peak_memory_stats() -> None:
         
     for i in range(torch.cuda.device_count()):
         torch.cuda.reset_peak_memory_stats(device=i)
+
+
+def log_gpu_memory_with_roles(train_device: torch.device, inference_model: torch.nn.Module, metrics: dict) -> None:
+    """Log memory stats for all GPUs with role labels and add to metrics."""
+    if not torch.cuda.is_available():
+        return
+        
+    train_device_idx = train_device.index if hasattr(train_device, 'index') else 0
+    inference_device_idx = next(inference_model.parameters()).device.index if hasattr(next(inference_model.parameters()).device, 'index') else 1
+    
+    for i in range(torch.cuda.device_count()):
+        allocated_gb = torch.cuda.memory_allocated(device=i) / 1024**3
+        reserved_gb = torch.cuda.memory_reserved(device=i) / 1024**3
+        max_allocated_gb = torch.cuda.max_memory_allocated(device=i) / 1024**3
+        metrics[f"memory_allocated_gpu{i}_gb"] = allocated_gb
+        metrics[f"memory_reserved_gpu{i}_gb"] = reserved_gb
+        metrics[f"memory_peak_gpu{i}_gb"] = max_allocated_gb
+        
+        # Add role labels
+        role = ""
+        if i == train_device_idx:
+            role = " (Training)"
+        elif i == inference_device_idx:
+            role = " (Inference)"
+            
+        print(f"GPU{i}{role} Memory: {allocated_gb:.2f}GB allocated, {reserved_gb:.2f}GB reserved, {max_allocated_gb:.2f}GB peak")

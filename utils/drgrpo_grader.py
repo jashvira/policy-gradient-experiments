@@ -21,11 +21,17 @@ Based on HF math_verify, verl, open reasoner zero, etc.
 
 import re
 import signal
+import warnings
+
 from itertools import islice, zip_longest
 from math import isclose
 from typing import Optional
 
 import sympy
+
+# Suppress the annoying macro substitution warnings from latex2sympy2_extended
+warnings.filterwarnings('ignore', message=".*macro.*failed.*substitution.*")
+
 from latex2sympy2_extended import latex2sympy
 from math_verify import ExprExtractionConfig, LatexExtractionConfig, parse, verify
 from pylatexenc import latex2text
