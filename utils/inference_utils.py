@@ -93,9 +93,6 @@ def generate_grouped_responses(
         logprobs_matrix = None
         gen_lens = None
         if return_scores and scores is not None:
-            # Stack scores -> (B, T, V)
-            scores_log = torch.stack([F.log_softmax(s, dim=-1) for s in scores], dim=1)
-
             # Build positions to gather chosen ids: (B, T)
             B = sequences.shape[0]
             T = len(scores)
@@ -104,8 +101,14 @@ def generate_grouped_responses(
             positions = positions.clamp(max=sequences.shape[1] - 1)
             chosen_ids = sequences.gather(1, positions)  # (B, T)
 
-            # Gather per-token logprobs for chosen ids: (B, T)
-            logprobs_matrix = scores_log.gather(2, chosen_ids.unsqueeze(-1)).squeeze(-1)
+            # Memory-efficient per-step log-prob computation without stacking (B, T, V)
+            logprobs_matrix = torch.empty((B, T), dtype=torch.float32, device=sequences.device)
+            for t, step_scores in enumerate(scores):
+                # step_scores: (B, V) unnormalized logits for step t
+                denom = torch.logsumexp(step_scores, dim=-1)  # (B,)
+                chosen_t = chosen_ids[:, t]
+                selected = step_scores.gather(1, chosen_t.unsqueeze(1)).squeeze(1)  # (B,)
+                logprobs_matrix[:, t] = selected - denom
 
             # Compute gen lengths up to and including EOS (or full T if none)
             eos_id = tokenizer.eos_token_id
