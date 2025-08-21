@@ -22,16 +22,16 @@
 
 ### Sequencing of the algorithm (current workflow: frozen reference on GPU1)
 - **Sync reference**: Copy weights `model.state_dict() → inference_model` (GPU1) at each GRPO step via `copy_model_weights()`. The `inference_model` is eval, frozen, and (optionally) compiled from initialization.
-- **Rollouts (GPU1)**: Sample `group_size` responses per prompt via HF `generate` (optional stop strings). If using GRPO-Clip, set `output_scores=True`.
+- **Rollouts (GPU1)**: Sample `group_size` responses per prompt via HF `generate` (optional stop strings). **Note**: We avoid `output_scores=True` due to OOM issues (see below).
 - **Rewards/advantages**: Score with `r1_zero_reward_fn`; compute group-normalized advantages per prompt.
-- **Old log-probs (GPU1 → GPU0)**: Convert generation scores to per-token log-probs and align with `assemble_old_log_probs`; move tensor to GPU0 and reuse within the step.
+- **Old log-probs (GPU1 → GPU0)**: Post-hoc forward pass on frozen inference model to compute per-token log-probs; move tensor to GPU0 and reuse within the step.
 - **Train (GPU0)**: Recompute current `log_probs`, compute GRPO/GRPO-Clip loss, accumulate microbatches, clip grads, then `optimizer.step()` per epoch.
 - **Validation (optional)**: Resync `inference_model` and run greedy eval.
 
 ### Current vs previous workflows
 - **Current: two-GPU frozen reference (HF)**
-  - **Reference source**: Frozen `inference_model` on GPU1 (HF `generate` with `output_scores=True`).
-  - **Old log-probs**: Use generation scores + `assemble_old_log_probs` to align; send tensor to GPU0.
+  - **Reference source**: Frozen `inference_model` on GPU1 (HF `generate` without `output_scores`).
+  - **Old log-probs**: Post-hoc forward pass on frozen inference model; send tensor to GPU0.
   - **Parallelism**: GPU1 handles rollout + `old_log_probs`; GPU0 trains.
   - **Memory**: Two models (one per GPU), small tensor transfers.
 
@@ -56,3 +56,16 @@
 
 ### Why learning still happens when r ≈ 1
 - The gradient comes from advantages: with r ≈ 1, GRPO-Clip reduces to REINFORCE-with-baseline. Group-normalized advantages push up high-reward responses and down low-reward ones, so you still get improvement.
+
+### Memory Optimization: Post-hoc Old Log-probs
+**Problem**: Using `output_scores=True` during generation causes OOM issues:
+- HF generation with `return_dict_in_generate=True, output_scores=True` materializes T tensors of shape (batch, vocab)
+- With large models and long sequences, this accumulates massive memory (e.g., 8×512×32k×fp16 = ~256MB per sequence)
+- Peak memory becomes T × (batch × vocab × dtype_size) instead of just one logits tensor
+
+**Solution**: Post-hoc log-prob computation:
+- Generate sequences normally (no `output_scores=True`)
+- After generation, run single forward pass on frozen `inference_model` using completed sequences
+- Use `compute_log_probs_for_responses()` to get old log-probs via `get_response_log_probs()`
+- Peak memory: one (batch × seq × vocab) tensor instead of T accumulated tensors
+- Mathematically identical results, drastically reduced memory footprint

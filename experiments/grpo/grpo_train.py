@@ -9,12 +9,11 @@ from utils.inference_utils import (
     generate_grouped_responses,
     greedy_generate_responses,
     compute_reward_metrics,
-    assemble_old_log_probs,
 )
 from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
 from utils.model_utils import setup_model_and_tokenizer
 from utils.drgrpo_grader import r1_zero_reward_fn
-from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy
+from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy, compute_log_probs_for_responses
 from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
 from experiments.grpo.grpo_utils import (
     compute_group_normalized_rewards,
@@ -96,6 +95,9 @@ import warnings
 warnings.filterwarnings('ignore', message='.*TensorFloat32.*')
 warnings.filterwarnings('ignore', message='.*flash_attention.*')
 warnings.filterwarnings('ignore', category=UserWarning, module='torch._inductor.*')
+# Suppress LaTeX macro warnings from grader
+warnings.filterwarnings('ignore', message='.*macro.*failed its substitution.*')
+warnings.filterwarnings('ignore', message='.*Error in configuration.*')
 
 
 # vLLM removed; we will use plain Hugging Face generation on a separate inference model/device
@@ -111,15 +113,19 @@ def setup_wandb(config: GRPOTrainConfig):
         print("Wandb disabled (project is None or empty)")
         return
 
+    # Add timestamp to run name to ensure uniqueness
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_run_name = f"{config.run_name}_{timestamp}"
+
     wandb.init(
         project=resolved_project,
         entity=resolved_entity,
-        name=config.run_name,
+        name=unique_run_name,
         config=config.__dict__,
         save_code=True,
     )
     print(
-        f"Initialized wandb: project={resolved_project}, entity={resolved_entity}")
+        f"Initialized wandb: project={resolved_project}, entity={resolved_entity}, run_name={unique_run_name}")
 
 
 def sample_rollout_batch(
@@ -131,16 +137,14 @@ def sample_rollout_batch(
     tokenizer,
     config: GRPOTrainConfig,
     seed: int = None,
-    use_output_scores: bool = False,
     stop_strings: Optional[List[str]] = None,
-) -> Tuple[List[str], List[str], List[str], Optional[torch.Tensor], Optional[torch.Tensor]]:
+) -> Tuple[List[str], List[str], List[str]]:
     """
     Sample a rollout batch: n_prompts questions, each with group_size responses.
 
     Returns:
-        Tuple of (all_prompts, all_responses, all_ground_truths, old_logprobs_matrix, gen_lens)
-        where the first three lists have length n_prompts * group_size, and the last two
-        tensors are optional (only present when use_output_scores=True).
+        Tuple of (all_prompts, all_responses, all_ground_truths)
+        where all lists have length n_prompts * group_size.
     """
     if seed is not None:
         random.seed(seed)
@@ -158,8 +162,8 @@ def sample_rollout_batch(
     print(
         f"Generating rollout batch: {n_prompts} prompts × {group_size} responses = {n_prompts * group_size} total")
 
-    # Generate grouped responses via utility
-    responses_out = generate_grouped_responses(
+    # Generate grouped responses via utility (no output_scores for memory efficiency)
+    responses = generate_grouped_responses(
         inference_model=inference_model,
         tokenizer=tokenizer,
         prompts=prompts,
@@ -169,14 +173,8 @@ def sample_rollout_batch(
         sampling_temperature=config.sampling_temperature,
         sampling_top_p=config.sampling_top_p,
         stop_strings=stop_strings,
-        return_scores=use_output_scores,
+        return_scores=False,
     )
-    old_logprobs_matrix: Optional[torch.Tensor] = None
-    gen_lens: Optional[torch.Tensor] = None
-    if use_output_scores:
-        responses, old_logprobs_matrix, gen_lens = responses_out
-    else:
-        responses = responses_out
 
     # Build flattened results aligned with responses
     all_prompts: List[str] = []
@@ -194,7 +192,8 @@ def sample_rollout_batch(
     from utils.memory_utils import cleanup_cuda_cache, get_model_device
     cleanup_cuda_cache(device=get_model_device(inference_model))
 
-    return all_prompts, all_responses, all_ground_truths, old_logprobs_matrix, gen_lens
+    return all_prompts, all_responses, all_ground_truths
+
 
 
 def train_on_rollout_batch(
@@ -212,29 +211,17 @@ def train_on_rollout_batch(
     """
     Train on a rollout batch using the computed advantages.
 
+    Computes policy log-probs per microbatch to avoid OOM on large batches.
+
     Returns metrics dictionary.
     """
     model.train()
 
-    # Tokenize all prompt-response pairs
-    tokenized = tokenize_prompt_and_output(
-        all_prompts, all_responses, tokenizer)
-    input_ids = tokenized["input_ids"].to(device)
-    labels = tokenized["labels"].to(device)
-    response_mask = tokenized["response_mask"].to(device)
-
-    # Get current policy log probs under autocast (no token entropy for memory safety)
-    with torch.autocast(device_type=device.type, dtype=config.torch_dtype):
-        policy_outputs = get_response_log_probs(
-            model=model,
-            input_ids=input_ids,
-            labels=labels,
-            return_token_entropy=False,
-        )
-    policy_log_probs = policy_outputs["log_probs"]
-
-    # Skip computing token entropy for now to avoid BxSxV allocations
-    token_entropy = torch.zeros_like(policy_log_probs)
+    # Tokenize once on CPU to avoid holding large tensors on GPU
+    tokenized = tokenize_prompt_and_output(all_prompts, all_responses, tokenizer)
+    input_ids_cpu = tokenized["input_ids"]
+    labels_cpu = tokenized["labels"]
+    response_mask_cpu = tokenized["response_mask"]
 
     # Compute train rewards for logging
     train_rewards = {"format": [], "answer": [], "total": []}
@@ -259,17 +246,25 @@ def train_on_rollout_batch(
     for start_idx in range(0, batch_size, micro_batch_size):
         end_idx = min(start_idx + micro_batch_size, batch_size)
 
-        # Extract microbatch
-        micro_policy_log_probs = policy_log_probs[start_idx:end_idx]
-        micro_response_mask = response_mask[start_idx:end_idx]
-        micro_advantages = advantages[start_idx:end_idx].unsqueeze(
-            1)  # (micro_batch, 1)
-        micro_old_log_probs = old_log_probs[start_idx:
-                                            end_idx] if old_log_probs is not None else None
-        micro_token_entropy = token_entropy[start_idx:end_idx]
+        # Move microbatch slice to device and compute policy log-probs
+        micro_input_ids = input_ids_cpu[start_idx:end_idx].to(device)
+        micro_labels = labels_cpu[start_idx:end_idx].to(device)
+        micro_response_mask = response_mask_cpu[start_idx:end_idx].to(device)
 
-        # Ensure gradients are enabled for microbatch
-        micro_policy_log_probs.requires_grad_(True)
+        # Compute policy log-probs for this microbatch with gradients
+        with torch.autocast(device_type=device.type, dtype=config.torch_dtype):
+            policy_outputs = get_response_log_probs(
+                model=model,
+                input_ids=micro_input_ids,
+                labels=micro_labels,
+                return_token_entropy=False,
+                requires_grad=True,
+            )
+        micro_policy_log_probs = policy_outputs["log_probs"]
+
+        # Extract other microbatch tensors
+        micro_advantages = advantages[start_idx:end_idx].unsqueeze(1)  # (micro_batch, 1)
+        micro_old_log_probs = old_log_probs[start_idx:end_idx] if old_log_probs is not None else None
 
         # Run microbatch train step
         loss, metadata = grpo_microbatch_train_step(
@@ -295,10 +290,8 @@ def train_on_rollout_batch(
         if config.loss_type == "grpo_clip" and "clip_fraction" in metadata:
             total_clip_fraction += metadata["clip_fraction"]
 
-        # Accumulate token entropy
-        masked_entropy = micro_token_entropy * micro_response_mask.float()
-        avg_entropy = masked_entropy.sum() / micro_response_mask.sum().clamp_min(1)
-        total_entropy += avg_entropy.item()
+        # Skip token entropy computation to save memory
+        total_entropy += 0.0
 
     # Take optimizer step after accumulating gradients and capture gradient norm
     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -345,9 +338,8 @@ def run_grpo_step(
     log_all_gpu_memory(f"Step {step + 1} - Start")
 
     # Sample rollout batch (Algorithm 3, Line 5)
-    use_output_scores = (config.loss_type == "grpo_clip")
     stop_strings = ["</answer>"] if hasattr(config, "use_answer_stop") and config.use_answer_stop else None
-    all_prompts, all_responses, all_ground_truths, old_logprobs_matrix, gen_lens = sample_rollout_batch(
+    all_prompts, all_responses, all_ground_truths = sample_rollout_batch(
         problems=problems,
         answers=answers,
         n_prompts=config.n_prompts_per_rollout_batch,
@@ -356,7 +348,6 @@ def run_grpo_step(
         tokenizer=tokenizer,
         config=config,
         seed=config.seed + step,
-        use_output_scores=use_output_scores,
         stop_strings=stop_strings,
     )
     log_all_gpu_memory(f"Step {step + 1} - After Rollout")
@@ -385,21 +376,19 @@ def run_grpo_step(
 
     # Get old policy log probs if needed for grpo_clip
     old_log_probs = None
-    if config.loss_type == "grpo_clip" and old_logprobs_matrix is not None:
-        # Build old_log_probs tensor from vectorized logprobs_matrix aligned to response spans
-        tokenized = tokenize_prompt_and_output(
-            all_prompts, all_responses, tokenizer)
-        labels = tokenized["labels"].to(device)
-        response_mask = tokenized["response_mask"].to(device)
-
-        old_lp = assemble_old_log_probs(
-            logprobs_matrix=old_logprobs_matrix,
-            gen_lens=gen_lens,
-            response_mask=response_mask,
-            labels=labels,
-            dtype=config.torch_dtype,
+    if config.loss_type == "grpo_clip":
+        # Post-hoc old log-probs: forward pass on frozen inference model (no output_scores during generation)
+        eval_device = next(inference_model.parameters()).device
+        old_log_probs, _ = compute_log_probs_for_responses(
+            model=inference_model,
+            prompts=all_prompts,
+            responses=all_responses,
+            tokenizer=tokenizer,
+            device=eval_device,
+            torch_dtype=config.torch_dtype,
+            requires_grad=False
         )
-        old_log_probs = old_lp.to(device=device, dtype=config.torch_dtype).detach()
+        old_log_probs = old_log_probs.to(device=device, dtype=config.torch_dtype).detach()
 
     # Training loop (Algorithm 3, Lines 8-9)
     print(f"Training for {config.epochs_per_rollout_batch} epochs...")

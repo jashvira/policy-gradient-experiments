@@ -231,36 +231,5 @@ def compute_reward_metrics(
     }
 
 
-def assemble_old_log_probs(
-    *,
-    logprobs_matrix: torch.Tensor,  # (B, T)
-    gen_lens: torch.Tensor,         # (B,)
-    response_mask: torch.Tensor,    # (B, S)
-    labels: torch.Tensor,           # (B, S)
-    dtype: torch.dtype = torch.bfloat16,
-) -> torch.Tensor:
-    """Vectorized alignment of generated-token logprobs to label positions.
 
-    - logprobs_matrix contains per-step log-probs for chosen tokens (length T per row)
-    - gen_lens has the effective generated lengths (<= T) per row
-    - response_mask marks which positions in labels belong to the response span
-
-    Returns: (B, S) tensor with old per-token logprobs at response positions, zeros elsewhere.
-    """
-    device = labels.device
-    resp_bool = response_mask.bool()
-    # Index of each response position within the response span: 0..R_i-1, -1 for non-response
-    order_idx = resp_bool.cumsum(dim=1) - 1
-    # Mask selecting the first gen_lens[i] response positions per row
-    gen_lens_dev = gen_lens.to(device)
-    fill_mask = resp_bool & (order_idx < gen_lens_dev.unsqueeze(1))
-
-    rows, cols = fill_mask.nonzero(as_tuple=True)
-    # Corresponding time indices in [0, T)
-    t_vals = order_idx[rows, cols].clamp_min(0)
-
-    old_lp = torch.zeros_like(labels, dtype=dtype, device=device)
-    values = logprobs_matrix.to(device)[rows, t_vals]
-    old_lp[rows, cols] = values
-    return old_lp
 

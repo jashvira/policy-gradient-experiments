@@ -213,6 +213,47 @@ def sft_microbatch_train_step(
     return loss.detach(), metadata
 
 
+def compute_log_probs_for_responses(
+    model: torch.nn.Module,
+    prompts: list[str],
+    responses: list[str],
+    tokenizer: PreTrainedTokenizerBase,
+    device: torch.device,
+    torch_dtype: torch.dtype,
+    requires_grad: bool = True
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Helper to compute log probs for prompt-response pairs.
+
+    Args:
+        model: Model to compute log probs with
+        prompts: List of prompt strings
+        responses: List of response strings (same length as prompts)
+        tokenizer: Tokenizer to use
+        device: Device to compute on
+        torch_dtype: Data type for autocast
+        requires_grad: Whether to enable gradients
+
+    Returns:
+        (log_probs, response_mask) both on the target device
+    """
+    tokenized = tokenize_prompt_and_output(prompts, responses, tokenizer)
+    input_ids = tokenized["input_ids"].to(device)
+    labels = tokenized["labels"].to(device)
+    response_mask = tokenized["response_mask"].to(device)
+
+    with torch.autocast(device_type=device.type, dtype=torch_dtype):
+        outputs = get_response_log_probs(
+            model=model,
+            input_ids=input_ids,
+            labels=labels,
+            return_token_entropy=False,
+            requires_grad=requires_grad,
+        )
+
+    log_probs = outputs["log_probs"]
+    return log_probs, response_mask
+
+
 def log_generations(
     model: torch.nn.Module,
     tokenizer: PreTrainedTokenizerBase,
