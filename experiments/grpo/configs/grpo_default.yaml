@@ -23,7 +23,7 @@ cliprange: 0.2  # For grpo_clip loss type
 # Optimization
 learning_rate: 1.0e-5
 lr: 1.0e-5
-gradient_accumulation_steps: 128  # microbatch size is 2, will fit on H100
+gradient_accumulation_steps: 512  # microbatch size is 2, will fit on H100
 weight_decay: 0.0
 adam_beta1: 0.9
 adam_beta2: 0.95
