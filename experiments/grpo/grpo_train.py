@@ -4,6 +4,13 @@ GRPO (Group Relative Policy Optimisation) training script.
 Implements Algorithm 3 from the GRPO paper.
 """
 
+# Ensure repository root is on sys.path for absolute imports
+import sys
+from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from utils.inference_utils import (
     init_inference_model_from,
     generate_grouped_responses,
@@ -42,10 +49,7 @@ os.environ.setdefault('TORCH_LOGS', '-inductor')  # Quiet inductor logs and avoi
 os.environ.setdefault('PYTORCH_DISABLE_STACK_TRACE', '1')  # Reduce stack trace verbosity
 
 
-# Ensure repository root is on sys.path for absolute imports
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+
 
 
 # Suppress massive tensor dumps and model architecture in error messages to keep logs clean
@@ -115,7 +119,15 @@ def setup_wandb(config: GRPOTrainConfig):
 
     # Add timestamp to run name to ensure uniqueness
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_run_name = f"{config.run_name}_{timestamp}"
+    # Hook model basename and loss type into the run name for easier identification
+    try:
+        model_base = Path(config.model_name).name
+    except Exception:
+        model_base = str(config.model_name)
+
+    loss_tag = getattr(config, "loss_type", "")
+    # Compose run name: {run_name}_{model}_{loss}_{timestamp}
+    unique_run_name = f"{config.run_name}_{model_base}_{loss_tag}_{timestamp}"
 
     wandb.init(
         project=resolved_project,
@@ -124,6 +136,12 @@ def setup_wandb(config: GRPOTrainConfig):
         config=config.__dict__,
         save_code=True,
     )
+    # Persist the unique run name back into the config for downstream use (e.g., checkpoint paths)
+    try:
+        config.run_name = unique_run_name
+    except Exception:
+        pass
+
     print(
         f"Initialized wandb: project={resolved_project}, entity={resolved_entity}, run_name={unique_run_name}")
 
@@ -202,7 +220,8 @@ def train_on_rollout_batch(
     all_prompts: List[str],
     all_responses: List[str],
     advantages: torch.Tensor,
-    old_log_probs: torch.Tensor,
+    *,
+    inference_model,
     config: GRPOTrainConfig,
     optimizer,
     device: torch.device,
@@ -222,6 +241,8 @@ def train_on_rollout_batch(
     input_ids_cpu = tokenized["input_ids"]
     labels_cpu = tokenized["labels"]
     response_mask_cpu = tokenized["response_mask"]
+
+    # Old policy log-probs will be computed per-microbatch on the eval device for grpo_clip
 
     # Compute train rewards for logging
     train_rewards = {"format": [], "answer": [], "total": []}
@@ -264,7 +285,28 @@ def train_on_rollout_batch(
 
         # Extract other microbatch tensors
         micro_advantages = advantages[start_idx:end_idx].unsqueeze(1)  # (micro_batch, 1)
-        micro_old_log_probs = old_log_probs[start_idx:end_idx] if old_log_probs is not None else None
+        micro_old_log_probs = None
+        if config.loss_type == "grpo_clip":
+            # Compute old log-probs on eval device for this microbatch only using shared util
+            eval_device = next(inference_model.parameters()).device
+            ids_ev = input_ids_cpu[start_idx:end_idx].to(eval_device, non_blocking=True)
+            lbl_ev = labels_cpu[start_idx:end_idx].to(eval_device, non_blocking=True)
+            old_scores = get_response_log_probs(
+                model=inference_model,
+                input_ids=ids_ev,
+                labels=lbl_ev,
+                return_token_entropy=False,
+                requires_grad=False,
+            )
+            micro_old_log_probs = old_scores["log_probs"].to(
+                device=device, dtype=config.torch_dtype, non_blocking=True
+            )
+            # Free eval slice
+            del ids_ev, lbl_ev, old_scores
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         # Run microbatch train step
         loss, metadata = grpo_microbatch_train_step(
@@ -283,8 +325,15 @@ def train_on_rollout_batch(
 
         # Accumulate metadata from first microbatch for logging
         if start_idx == 0:
-            all_metadata = {k: v.item() if torch.is_tensor(
-                v) else v for k, v in metadata.items()}
+            # Only keep scalar items; upstream now returns scalar-only metadata
+            summarized: dict[str, float | int | bool] = {}
+            for k, v in metadata.items():
+                if torch.is_tensor(v):
+                    if v.numel() == 1:
+                        summarized[k] = v.item()
+                else:
+                    summarized[k] = v
+            all_metadata = summarized
 
         # Accumulate clip fraction if using grpo_clip
         if config.loss_type == "grpo_clip" and "clip_fraction" in metadata:
@@ -374,21 +423,7 @@ def run_grpo_step(
     advantages = advantages.to(device=device, dtype=config.torch_dtype)
     log_all_gpu_memory(f"Step {step + 1} - After Advantages")
 
-    # Get old policy log probs if needed for grpo_clip
-    old_log_probs = None
-    if config.loss_type == "grpo_clip":
-        # Post-hoc old log-probs: forward pass on frozen inference model (no output_scores during generation)
-        eval_device = next(inference_model.parameters()).device
-        old_log_probs, _ = compute_log_probs_for_responses(
-            model=inference_model,
-            prompts=all_prompts,
-            responses=all_responses,
-            tokenizer=tokenizer,
-            device=eval_device,
-            torch_dtype=config.torch_dtype,
-            requires_grad=False
-        )
-        old_log_probs = old_log_probs.to(device=device, dtype=config.torch_dtype).detach()
+    # Old policy log-probs are computed inside train_on_rollout_batch for grpo_clip
 
     # Training loop (Algorithm 3, Lines 8-9)
     print(f"Training for {config.epochs_per_rollout_batch} epochs...")
@@ -401,7 +436,7 @@ def run_grpo_step(
             all_prompts=all_prompts,
             all_responses=all_responses,
             advantages=advantages,
-            old_log_probs=old_log_probs,
+            inference_model=inference_model,
             config=config,
             optimizer=optimizer,
             device=device,
@@ -495,8 +530,15 @@ def evaluate_on_validation(
 
     log_all_gpu_memory(f"Validation Step {step + 1} - Start")
 
-    n_val_samples = min(config.val_samples, len(val_problems))
-    indices = random.sample(range(len(val_problems)), n_val_samples)
+    # Support selecting the entire validation set via config.val_samples == "all"
+    if isinstance(getattr(config, "val_samples", None), str) and str(config.val_samples).lower() == "all":
+        n_val_samples = len(val_problems)
+        # Deterministic full-order evaluation (no extra shuffling)
+        indices = list(range(len(val_problems)))
+    else:
+        # Default: sample a random subset of size val_samples (bounded by dataset size)
+        n_val_samples = min(int(config.val_samples), len(val_problems))
+        indices = random.sample(range(len(val_problems)), n_val_samples)
 
     prompts = [format_with_r1_zero_prompt(val_problems[i]) for i in indices]
     ground_truths = [val_answers[i] for i in indices]
@@ -526,6 +568,29 @@ def evaluate_on_validation(
         ground_truths=ground_truths,
         reward_fn=lambda r, g, fast=True: r1_zero_reward_fn(r, g, fast=fast),
     )
+
+    # Save a small sample (first 10) of already-generated responses without extra generation
+    try:
+        from pathlib import Path as _Path
+        from utils.training_utils import write_generations_from_samples as _write_gen
+
+        out_dir = _Path(config.val_log_dir) / _Path(getattr(config, "run_name", "grpo")) / f"val_step_{step + 1}"
+        sample_n = min(10, len(prompts))
+        if sample_n > 0:
+            saved = _write_gen(
+                prompts=prompts[:sample_n],
+                responses=responses[:sample_n],
+                ground_truths=ground_truths[:sample_n],
+                reward_fn=r1_zero_reward_fn,
+                out_dir=str(out_dir),
+                model_name=getattr(config, "run_name", "grpo"),
+                max_examples=sample_n,
+            )
+            if saved:
+                print(f"Saved {sample_n} validation generations to {saved}")
+    except Exception:
+        # Non-fatal: continue even if logging fails
+        pass
 
     # Final cleanup after validation to reduce memory fragmentation
     cleanup_cuda_cache(device=get_model_device(inference_model))
@@ -602,6 +667,35 @@ def main(
         fused=config_obj.adam_fused,
     )
 
+    # Optional pre-training validation for baseline metrics and sanity check
+    try:
+        print("Running pre-training validation...")
+        # Ensure inference model has the latest weights
+        copy_model_weights(model, inference_model)
+        pre_val_metrics = evaluate_on_validation(
+            inference_model=inference_model,
+            tokenizer=tokenizer,
+            val_problems=val_problems,
+            val_answers=val_answers,
+            config=config_obj,
+            step=-1,
+        )
+        # Log onto the same keys/series as later evals; use step=-1 so it appears before step 0
+        if wandb.run is not None:
+            wandb.log(pre_val_metrics, step=-1)
+        print(f"Pre-training validation: {pre_val_metrics}")
+    except Exception as _e:
+        # Non-fatal; continue with training even if pre-eval fails
+        print(f"Pre-training validation skipped due to error: {_e}")
+    finally:
+        # Use unified cleanup utility to release allocator pressure on both devices
+        try:
+            from utils.memory_utils import cleanup_cuda_cache, get_model_device
+            cleanup_cuda_cache(device=get_model_device(inference_model))
+            cleanup_cuda_cache(device=device)
+        except Exception:
+            pass
+
     # Training loop
     print(f"Starting GRPO training for {config_obj.n_grpo_steps} steps...")
 
@@ -652,7 +746,7 @@ def main(
 
             # Periodic checkpoint saving
             if (step + 1) % config_obj.save_every_grpo_steps == 0:
-                save_path = Path(config_obj.save_dir) / \
+                save_path = Path(config_obj.save_dir) / Path(config_obj.run_name) / \
                     f"checkpoint_step_{step + 1}"
                 save_path.mkdir(parents=True, exist_ok=True)
 
@@ -664,7 +758,7 @@ def main(
         # Cleanup
         # Final save
         if config_obj.save_at_end:
-            final_save_path = Path(config_obj.save_dir) / "final_model"
+            final_save_path = Path(config_obj.save_dir) / Path(config_obj.run_name) / "final_model"
             final_save_path.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(final_save_path)
             tokenizer.save_pretrained(final_save_path)
