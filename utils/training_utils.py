@@ -153,10 +153,16 @@ def get_response_log_probs(
             - "log_probs": Tensor (batch_size, sequence_length)
             - "token_entropy": optional Tensor (batch_size, sequence_length)
     """
-    # Enable/disable autograd depending on caller context
-    with torch.set_grad_enabled(requires_grad):
-        logits = model(
-            input_ids, attention_mask=attention_mask).logits  # (B, S, V)
+    # Prefer inference_mode when gradients are not required
+    if not requires_grad:
+        with torch.inference_mode():
+            logits = model(
+                input_ids, attention_mask=attention_mask).logits  # (B, S, V)
+    else:
+        # Enable autograd when gradients are needed
+        with torch.set_grad_enabled(True):
+            logits = model(
+                input_ids, attention_mask=attention_mask).logits  # (B, S, V)
 
     # Memory-light per-token log-prob: log_softmax = logits - logsumexp(logits)
     # Avoids materializing the (B, S, V) log-prob tensor
@@ -396,3 +402,59 @@ def log_generations(
         model.train()
 
     return result
+
+
+def write_generations_from_samples(
+    prompts: List[str],
+    responses: List[str],
+    ground_truths: List[str],
+    reward_fn: Callable[[str, str], Dict[str, float]],
+    *,
+    out_dir: Optional[str] = None,
+    model_name: Optional[str] = None,
+    max_examples: int = 10,
+):
+    """Write a small JSON file containing already-generated samples.
+
+    Matches the SFT `log_generations` output format for compatibility.
+    """
+    from datetime import datetime
+    import json
+    from pathlib import Path
+
+    n = min(max_examples, len(prompts))
+    if n <= 0:
+        return None
+
+    examples = []
+    for i in range(n):
+        r = reward_fn(responses[i], ground_truths[i])
+        examples.append({
+            "prompt": prompts[i],
+            "response": responses[i],
+            "ground_truth": ground_truths[i],
+            "reward": r.get("reward"),
+            "format_reward": r.get("format_reward"),
+            "answer_reward": r.get("answer_reward"),
+        })
+
+    payload = {
+        "metadata": {
+            "timestamp": datetime.now().isoformat(),
+            "generation_backend": "hf",
+            "model_name": model_name or "unknown",
+            "num_examples": n,
+        },
+        "examples": examples,
+    }
+
+    if out_dir:
+        p = Path(out_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"{(model_name or 'model')}_generations_{stamp}.json"
+        with open(p / fname, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        return str(p / fname)
+
+    return payload

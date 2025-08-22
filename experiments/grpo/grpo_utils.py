@@ -36,7 +36,7 @@ def compute_group_normalized_rewards(
         DeepSeek-R1: https://arxiv.org/abs/2501.12948
 
     Args:
-        reward_fn: Callable[[str, str], dict[str, float]], 
+        reward_fn: Callable[[str, str], dict[str, float]],
             scores the rollout responses against the ground truths,
             producing a dict with keys "reward", "format_reward", and "answer_reward".
         rollout_responses: list[str], rollouts from the policy.
@@ -47,15 +47,15 @@ def compute_group_normalized_rewards(
             because the ground truth for each example is repeated `group_size` times.
         group_size: int, number of responses per question (group).
         advantage_eps: float, small constant to avoid division by zero in normalisation.
-        normalize_by_std: bool, if True, divide by the per-group standard deviation; 
+        normalize_by_std: bool, if True, divide by the per-group standard deviation;
             otherwise subtract only the group mean.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-            advantages shape (rollout_batch_size,): Group-normalised rewards 
+            advantages shape (rollout_batch_size,): Group-normalised rewards
                 for each rollout response.
-            raw_rewards shape (rollout_batch_size,): Unnormalised rewards 
-                for each rollout response.  
+            raw_rewards shape (rollout_batch_size,): Unnormalised rewards
+                for each rollout response.
             metadata: dict containing statistics to log (e.g. mean, std, max/min of rewards).
     """
     if len(rollout_responses) != len(repeated_ground_truths):
@@ -63,30 +63,30 @@ def compute_group_normalized_rewards(
             f"Length mismatch: {len(rollout_responses)} responses vs "
             f"{len(repeated_ground_truths)} ground truths"
         )
-    
+
     rollout_batch_size = len(rollout_responses)
     if rollout_batch_size % group_size != 0:
         raise ValueError(
             f"rollout_batch_size ({rollout_batch_size}) must be divisible by "
             f"group_size ({group_size})"
         )
-    
+
     # Compute raw rewards for all responses
     raw_rewards_list = []
     for response, ground_truth in zip(rollout_responses, repeated_ground_truths):
         reward_dict = reward_fn(response, ground_truth)
         raw_rewards_list.append(reward_dict["reward"])
-    
+
     # Convert to tensor with specified dtype
     raw_rewards = torch.tensor(raw_rewards_list, dtype=dtype)
-    
-    # Reshape to groups: (n_groups, group_size)  
+
+    # Reshape to groups: (n_groups, group_size)
     n_groups = rollout_batch_size // group_size
     grouped_rewards = raw_rewards.view(n_groups, group_size)
-    
+
     # Compute per-group statistics
     group_means = grouped_rewards.mean(dim=1, keepdim=True)  # (n_groups, 1)
-    
+
     if normalize_by_std:
         group_stds = grouped_rewards.std(dim=1, keepdim=True, unbiased=True)  # (n_groups, 1)
         # Normalize: (reward - mean) / (std + eps)
@@ -94,10 +94,10 @@ def compute_group_normalized_rewards(
     else:
         # Normalize: reward - mean
         normalized_rewards = grouped_rewards - group_means
-    
+
     # Flatten back to original shape
     advantages = normalized_rewards.view(-1)
-    
+
     # Compute metadata
     metadata = {
         "raw_rewards_mean": float(raw_rewards.mean()),
@@ -111,7 +111,7 @@ def compute_group_normalized_rewards(
         "group_means_mean": float(group_means.mean()),
         "group_means_std": float(group_means.std()),
     }
-    
+
     if normalize_by_std:
         group_stds_flat = group_stds.view(-1)
         metadata.update({
@@ -120,7 +120,7 @@ def compute_group_normalized_rewards(
             "group_stds_min": float(group_stds_flat.min()),
             "group_stds_max": float(group_stds_flat.max()),
         })
-    
+
     return advantages, raw_rewards, metadata
 
 
@@ -129,7 +129,7 @@ def compute_naive_policy_gradient_loss(
     policy_log_probs: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Compute the policy-gradient loss at every token, where raw_rewards_or_advantages 
+    Compute the policy-gradient loss at every token, where raw_rewards_or_advantages
     is either the raw reward or an already-normalised advantage.
 
     Args:
@@ -139,27 +139,27 @@ def compute_naive_policy_gradient_loss(
             each token.
 
     Returns:
-        torch.Tensor shape (batch_size, sequence_length), the per-token policy-gradient 
+        torch.Tensor shape (batch_size, sequence_length), the per-token policy-gradient
         loss (to be aggregated across the batch and sequence dimensions in the training loop).
     """
     # Validate input shapes
     batch_size = policy_log_probs.shape[0]
     sequence_length = policy_log_probs.shape[1]
-    
+
     if raw_rewards_or_advantages.shape != (batch_size, 1):
         raise ValueError(
             f"Expected raw_rewards_or_advantages shape ({batch_size}, 1), "
             f"got {raw_rewards_or_advantages.shape}"
         )
-    
+
     # Broadcast rewards/advantages over sequence length
     # Shape: (batch_size, 1) -> (batch_size, sequence_length)
     broadcasted_rewards = raw_rewards_or_advantages.expand(batch_size, sequence_length)
-    
+
     # Compute per-token policy gradient loss
     # Policy gradient: -reward * log_prob
     per_token_loss = -broadcasted_rewards * policy_log_probs
-    
+
     return per_token_loss
 
 
@@ -173,74 +173,69 @@ def compute_grpo_clip_loss(
     Compute the GRPO-Clip loss per token.
 
     Implements the loss from equation (33):
-    -min(π_θ(a_t|q, o<t) / π_θ_old(a_t|q, o<t) * A_t, 
+    -min(π_θ(a_t|q, o<t) / π_θ_old(a_t|q, o<t) * A_t,
          clip(π_θ(a_t|q, o<t) / π_θ_old(a_t|q, o<t), 1-ε, 1+ε) * A_t)
 
     Args:
         advantages: torch.Tensor shape (batch_size, 1), per-example advantages A.
-        policy_log_probs: torch.Tensor shape (batch_size, sequence_length), 
+        policy_log_probs: torch.Tensor shape (batch_size, sequence_length),
             per-token log probs from the policy being trained.
-        old_log_probs: torch.Tensor shape (batch_size, sequence_length), 
+        old_log_probs: torch.Tensor shape (batch_size, sequence_length),
             per-token log probs from the old policy.
         cliprange: float, clip parameter ε (e.g. 0.2).
 
     Returns:
         tuple[torch.Tensor, dict[str, torch.Tensor]]:
-            loss: torch.Tensor of shape (batch_size, sequence_length), 
+            loss: torch.Tensor of shape (batch_size, sequence_length),
                 the per-token clipped loss.
             metadata: dict containing clipping statistics for logging.
     """
     # Validate input shapes
     batch_size, sequence_length = policy_log_probs.shape
-    
+
     if advantages.shape != (batch_size, 1):
         raise ValueError(
             f"Expected advantages shape ({batch_size}, 1), got {advantages.shape}"
         )
-    
+
     if old_log_probs.shape != (batch_size, sequence_length):
         raise ValueError(
             f"Expected old_log_probs shape ({batch_size}, {sequence_length}), "
             f"got {old_log_probs.shape}"
         )
-    
+
     # Broadcast advantages over sequence length
     # Shape: (batch_size, 1) -> (batch_size, sequence_length)
     broadcasted_advantages = advantages.expand(batch_size, sequence_length)
-    
+
     # Compute importance sampling ratio: π_θ / π_θ_old
     # log(π_θ / π_θ_old) = log(π_θ) - log(π_θ_old)
     log_ratio = policy_log_probs - old_log_probs
     ratio = torch.exp(log_ratio)
-    
+
     # Compute unclipped policy gradient term: ratio * A_t
     unclipped_loss = ratio * broadcasted_advantages
-    
+
     # Compute clipped policy gradient term: clip(ratio, 1-ε, 1+ε) * A_t
     clipped_ratio = torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
     clipped_loss = clipped_ratio * broadcasted_advantages
-    
+
     # Take minimum (which gives maximum loss since we negate at the end)
     min_loss = torch.min(unclipped_loss, clipped_loss)
-    
+
     # Apply negative sign for loss (we want to minimize negative reward)
     per_token_loss = -min_loss
-    
+
     # Compute metadata for logging
     # Track which tokens were clipped
     was_clipped = (clipped_loss < unclipped_loss).float()
-    
+
+    # Keep metadata minimal and scalar-only to avoid logging large tensors downstream
     metadata = {
         "ratio_mean": ratio.mean(),
-        "ratio_std": ratio.std(),
-        "ratio_min": ratio.min(),
-        "ratio_max": ratio.max(),
         "clip_fraction": was_clipped.mean(),
-        "unclipped_loss_mean": unclipped_loss.mean(),
-        "clipped_loss_mean": clipped_loss.mean(),
-        "was_clipped": was_clipped,
     }
-    
+
     return per_token_loss, metadata
 
 
@@ -256,37 +251,37 @@ def compute_policy_gradient_loss(
     Select and compute the desired policy-gradient loss.
 
     Args:
-        policy_log_probs: torch.Tensor shape (batch_size, sequence_length), 
+        policy_log_probs: torch.Tensor shape (batch_size, sequence_length),
             per-token log-probabilities from the policy being trained.
         loss_type: str, one of "no_baseline", "reinforce_with_baseline", or "grpo_clip".
-        raw_rewards: torch.Tensor | None, required if loss_type == "no_baseline"; 
+        raw_rewards: torch.Tensor | None, required if loss_type == "no_baseline";
             shape (batch_size, 1).
-        advantages: torch.Tensor | None, required for "reinforce_with_baseline" and "grpo_clip"; 
+        advantages: torch.Tensor | None, required for "reinforce_with_baseline" and "grpo_clip";
             shape (batch_size, 1).
-        old_log_probs: torch.Tensor | None, required for "grpo_clip"; 
+        old_log_probs: torch.Tensor | None, required for "grpo_clip";
             shape (batch_size, sequence_length).
         cliprange: float | None, required for "grpo_clip"; scalar ε used for clipping.
 
     Returns:
         tuple[torch.Tensor, dict[str, torch.Tensor]]:
             loss: torch.Tensor shape (batch_size, sequence_length), per-token loss.
-            metadata: dict, statistics from the underlying routine 
+            metadata: dict, statistics from the underlying routine
                 (e.g., clip fraction for GRPO-Clip).
     """
     valid_loss_types = ["no_baseline", "reinforce_with_baseline", "grpo_clip"]
     if loss_type not in valid_loss_types:
         raise ValueError(f"Invalid loss_type '{loss_type}'. Must be one of {valid_loss_types}")
-    
+
     if loss_type == "no_baseline":
         # Use raw rewards as advantages (no baseline subtraction)
         if raw_rewards is None:
             raise ValueError("raw_rewards is required for loss_type='no_baseline'")
-        
+
         per_token_loss = compute_naive_policy_gradient_loss(
             raw_rewards_or_advantages=raw_rewards,
             policy_log_probs=policy_log_probs,
         )
-        
+
         # Compute basic metadata for raw rewards
         metadata = {
             "raw_rewards_mean": raw_rewards.mean(),
@@ -294,17 +289,17 @@ def compute_policy_gradient_loss(
             "raw_rewards_min": raw_rewards.min(),
             "raw_rewards_max": raw_rewards.max(),
         }
-        
+
     elif loss_type == "reinforce_with_baseline":
         # Use pre-computed advantages (group-normalised rewards)
         if advantages is None:
             raise ValueError("advantages is required for loss_type='reinforce_with_baseline'")
-        
+
         per_token_loss = compute_naive_policy_gradient_loss(
             raw_rewards_or_advantages=advantages,
             policy_log_probs=policy_log_probs,
         )
-        
+
         # Compute basic metadata for advantages
         metadata = {
             "advantages_mean": advantages.mean(),
@@ -312,7 +307,7 @@ def compute_policy_gradient_loss(
             "advantages_min": advantages.min(),
             "advantages_max": advantages.max(),
         }
-        
+
     elif loss_type == "grpo_clip":
         # Use GRPO-Clip loss with advantages and old policy log probs
         if advantages is None:
@@ -321,16 +316,16 @@ def compute_policy_gradient_loss(
             raise ValueError("old_log_probs is required for loss_type='grpo_clip'")
         if cliprange is None:
             raise ValueError("cliprange is required for loss_type='grpo_clip'")
-        
+
         per_token_loss, metadata = compute_grpo_clip_loss(
             advantages=advantages,
             policy_log_probs=policy_log_probs,
             old_log_probs=old_log_probs,
             cliprange=cliprange,
         )
-        
+
         # metadata is already provided by compute_grpo_clip_loss
-        
+
     return per_token_loss, metadata
 
 
@@ -352,13 +347,13 @@ def masked_mean(
     """
     if tensor.shape != mask.shape:
         raise ValueError(f"tensor and mask must have the same shape. Got tensor: {tensor.shape}, mask: {mask.shape}")
-    
+
     # Convert mask to same dtype as tensor for computation
     mask_float = mask.to(dtype=tensor.dtype)
-    
+
     # Apply mask: set unmasked elements to 0
     masked_tensor = tensor * mask_float
-    
+
     if dim is None:
         # Compute mean over all masked elements
         num_masked_elements = mask_float.sum()
@@ -370,7 +365,7 @@ def masked_mean(
         # Compute mean along specified dimension
         # Count number of masked elements along the dimension
         num_masked_elements = mask_float.sum(dim=dim)
-        
+
         # Handle case where some slices have no masked elements
         # Use torch.where to avoid division by zero
         masked_sum = masked_tensor.sum(dim=dim)
@@ -379,7 +374,7 @@ def masked_mean(
             masked_sum / num_masked_elements,
             torch.full_like(masked_sum, float('nan'))
         )
-        
+
         return result
 
 
@@ -397,17 +392,17 @@ def grpo_microbatch_train_step(
     Execute a forward-and-backward pass on a microbatch for GRPO training.
 
     Args:
-        policy_log_probs: torch.Tensor shape (batch_size, sequence_length), 
+        policy_log_probs: torch.Tensor shape (batch_size, sequence_length),
             per-token log-probabilities from the policy being trained.
-        response_mask: torch.Tensor shape (batch_size, sequence_length), 
+        response_mask: torch.Tensor shape (batch_size, sequence_length),
             1 for response tokens, 0 for prompt/padding.
         gradient_accumulation_steps: int, number of microbatches per optimizer step.
         loss_type: str, one of "no_baseline", "reinforce_with_baseline", "grpo_clip".
-        raw_rewards: torch.Tensor | None, needed when loss_type == "no_baseline"; 
+        raw_rewards: torch.Tensor | None, needed when loss_type == "no_baseline";
             shape (batch_size, 1).
-        advantages: torch.Tensor | None, needed when loss_type != "no_baseline"; 
+        advantages: torch.Tensor | None, needed when loss_type != "no_baseline";
             shape (batch_size, 1).
-        old_log_probs: torch.Tensor | None, required for GRPO-Clip; 
+        old_log_probs: torch.Tensor | None, required for GRPO-Clip;
             shape (batch_size, sequence_length).
         cliprange: float | None, clip parameter ε for GRPO-Clip.
 
@@ -417,14 +412,14 @@ def grpo_microbatch_train_step(
             metadata: dict with metadata from the underlying loss call and other statistics.
     """
     batch_size, sequence_length = policy_log_probs.shape
-    
+
     # Validate inputs match expected shapes
     if response_mask.shape != (batch_size, sequence_length):
         raise ValueError(
             f"response_mask shape {response_mask.shape} doesn't match "
             f"policy_log_probs shape {policy_log_probs.shape}"
         )
-    
+
     # Step 1: Compute per-token policy gradient loss
     per_token_loss, loss_metadata = compute_policy_gradient_loss(
         policy_log_probs=policy_log_probs,
@@ -434,25 +429,25 @@ def grpo_microbatch_train_step(
         old_log_probs=old_log_probs,
         cliprange=cliprange,
     )
-    
+
     # Step 2: Apply response mask and compute mean over sequence dimension
     # Use masked_mean with dim=1 to average over sequence length (only response tokens)
     per_example_loss = masked_mean(per_token_loss, response_mask.to(per_token_loss.dtype), dim=1)
-    
+
     # Step 3: Average over batch dimension
     batch_loss = per_example_loss.mean()
-    
+
     # Step 4: Adjust for gradient accumulation steps
-    # Scale by 1/gradient_accumulation_steps so that when we accumulate gradients 
+    # Scale by 1/gradient_accumulation_steps so that when we accumulate gradients
     # across multiple microbatches, the final gradient magnitude is correct
     scaled_loss = batch_loss / gradient_accumulation_steps
-    
+
     # Step 5: Backpropagate gradients
     scaled_loss.backward()
-    
+
     # Step 6: Prepare metadata for logging
     num_masked_tokens = response_mask.sum()
-    
+
     metadata = {
         **loss_metadata,  # Include metadata from policy gradient computation
         "per_example_loss_mean": per_example_loss.mean().detach(),
@@ -464,6 +459,6 @@ def grpo_microbatch_train_step(
         "sequence_length": torch.tensor(sequence_length),
         "gradient_accumulation_steps": torch.tensor(gradient_accumulation_steps),
     }
-    
+
     # Return the scaled loss for logging (this is what was actually used for backprop)
     return scaled_loss.detach(), metadata

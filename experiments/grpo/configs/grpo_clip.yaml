@@ -1,5 +1,5 @@
-# Default GRPO configuration
-# Based on hyperparameters provided in the specification
+# GRPO configuration using GRPO-Clip loss
+# Based on grpo_default with loss_type set to grpo_clip
 
 # GRPO algorithm parameters
 n_grpo_steps: 200
@@ -15,7 +15,7 @@ sampling_max_tokens: 512
 sampling_top_p: 1.0
 
 # Loss configuration
-loss_type: "reinforce_with_baseline"
+loss_type: "grpo_clip"
 use_std_normalization: true
 advantage_eps: 1.0e-6
 cliprange: 0.2  # For grpo_clip loss type
@@ -42,7 +42,7 @@ vllm_gpu_mem_utilization: 0.85
 # Data and validation
 data_path: null  # Will default to MATH dataset
 val_every_grpo_steps: 10
-val_rollout_batch_size: 1024
+val_rollout_batch_size: 512
 val_samples: 1024
 val_temperature: 0.0
 val_top_p: 1.0
@@ -56,7 +56,7 @@ val_log_dir: "logs/grpo_val_generations"
 
 # Logging
 project: "grpo-math"
-run_name: "grpo-base"
+run_name: "grpo-base-clip"
 wandb_entity: null
 seed: 42
 
@@ -64,3 +64,5 @@ seed: 42
 warmup_steps: 0
 warmup_ratio: 0.0
 lr_scheduler: "cosine"
+
+

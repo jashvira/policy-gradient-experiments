@@ -48,7 +48,8 @@ def generate_grouped_responses(
     inference_model.eval()
     eval_device = next(inference_model.parameters()).device
 
-    with torch.no_grad():
+    # Use inference_mode to disable autograd and some dispatcher overhead
+    with torch.inference_mode():
         tokenized = tokenizer(prompts, padding=True, truncation=False, return_tensors="pt")
         input_ids = tokenized["input_ids"].to(eval_device)
         attention_mask = tokenized["attention_mask"].to(eval_device)
