@@ -69,3 +69,10 @@
 - Use `compute_log_probs_for_responses()` to get old log-probs via `get_response_log_probs()`
 - Peak memory: one (batch × seq × vocab) tensor instead of T accumulated tensors
 - Mathematically identical results, drastically reduced memory footprint
+
+
+
+
+- Can we reuse stuff for the epochs?
+- probably need vllm for faster inference -- during eval as well as training
+- should have easy -> hard curriculum ideally
