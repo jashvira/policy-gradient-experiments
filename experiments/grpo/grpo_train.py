@@ -107,7 +107,7 @@ warnings.filterwarnings('ignore', message='.*Error in configuration.*')
 # vLLM removed; we will use plain Hugging Face generation on a separate inference model/device
 
 
-def setup_wandb(config: GRPOTrainConfig):
+def setup_wandb(config: GRPOTrainConfig, config_path: Optional[str] = None):
     """Initialize wandb logging."""
     resolved_project = os.environ.get("WANDB_PROJECT", config.project)
     resolved_entity = os.environ.get("WANDB_ENTITY", config.wandb_entity)
@@ -139,6 +139,37 @@ def setup_wandb(config: GRPOTrainConfig):
     # Persist the unique run name back into the config for downstream use (e.g., checkpoint paths)
     try:
         config.run_name = unique_run_name
+    except Exception:
+        pass
+
+    # Log the original YAML config file as an artifact before training starts
+    try:
+        if config_path and os.path.exists(config_path) and wandb.run is not None:
+            import hashlib
+            # Compute a short content hash to help dedup/versioning
+            cfg_bytes = Path(config_path).read_bytes()
+            cfg_sha = hashlib.sha256(cfg_bytes).hexdigest()
+            short_sha = cfg_sha[:12]
+
+            # Name matches existing convention: train_config (versioned by W&B)
+            artifact = wandb.Artifact(
+                name="train_config",
+                type="config",
+                metadata={
+                    "run_name": unique_run_name,
+                    "model_name": getattr(config, "model_name", None),
+                    "loss_type": getattr(config, "loss_type", None),
+                    "sha256": cfg_sha,
+                },
+            )
+            # Preserve original filename (e.g., grpo_clip.yaml)
+            artifact.add_file(str(config_path), name=Path(config_path).name)
+            wandb.log_artifact(artifact, aliases=["latest", f"run:{unique_run_name}", f"sha256:{short_sha}"])
+            # Also save the file into the run's file set for convenience
+            try:
+                wandb.save(str(config_path))
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -449,21 +480,17 @@ def run_grpo_step(
     # Update old policy (Algorithm 3, Line 10 - implicitly, we'll copy weights)
     # Note: For efficiency, we update old_model at the end of each step
 
-    # Aggregate metrics
+    # Step-wise metrics only
     metrics = {
         "step": step + 1,
         "rollout_batch_size": len(all_responses),
         "n_prompts": config.n_prompts_per_rollout_batch,
         "group_size": config.group_size,
         **reward_metadata,
-        "avg_train_loss": np.mean([m["train_loss"] for m in epoch_metrics]),
     }
-
-    # Add first epoch's detailed metrics
     if epoch_metrics:
-        for key, value in epoch_metrics[0].items():
-            if key not in metrics:
-                metrics[f"epoch0_{key}"] = value
+        # Merge the single epoch's metrics directly (epochs_per_rollout_batch is typically 1)
+        metrics.update(epoch_metrics[-1])
 
     log_all_gpu_memory(f"Step {step + 1} - End")
 
@@ -617,7 +644,7 @@ def main(
     random.seed(config_obj.seed)
 
     # Setup wandb
-    setup_wandb(config_obj)
+    setup_wandb(config_obj, config_path=config)
 
     # Load data
     print("Loading MATH dataset...")
