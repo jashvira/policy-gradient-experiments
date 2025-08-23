@@ -48,6 +48,7 @@ class GRPOTrainConfig(BaseTrainConfig):
     learning_rate: float = 1e-5  # Lower learning rate for RL
     lr: float = 1e-5  # Alias for learning_rate
     adam_beta2: float = 0.95  # GRPO-specific beta2 value
+    adam_fused: Optional[bool] = None  # Enable fused AdamW when supported
     gradient_accumulation_steps: int = 128  # Microbatch size = 2 for H100
     gpu_memory_utilization: float = 0.85
     vllm_gpu_mem_utilization: float = 0.85  # Override base
@@ -56,7 +57,8 @@ class GRPOTrainConfig(BaseTrainConfig):
     data_path: Optional[str] = None  # Defaults to MATH dataset if None
     val_every_grpo_steps: int = 10  # Evaluate every N GRPO steps
     val_rollout_batch_size: int = 64  # Smaller batch for validation
-    val_samples: int = 1024  # Number of validation samples for robust evaluation
+    # Number of validation samples or "all" to use the entire validation set
+    val_samples: Union[int, str] = 1024
     save_every_grpo_steps: int = 50  # Save checkpoint every N steps
 
     # Model and checkpoint settings
