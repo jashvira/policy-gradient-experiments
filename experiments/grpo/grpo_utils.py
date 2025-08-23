@@ -98,18 +98,12 @@ def compute_group_normalized_rewards(
     # Flatten back to original shape
     advantages = normalized_rewards.view(-1)
 
-    # Compute metadata
+    # Compute minimal metadata
     metadata = {
         "raw_rewards_mean": float(raw_rewards.mean()),
         "raw_rewards_std": float(raw_rewards.std()),
-        "raw_rewards_min": float(raw_rewards.min()),
-        "raw_rewards_max": float(raw_rewards.max()),
         "advantages_mean": float(advantages.mean()),
         "advantages_std": float(advantages.std()),
-        "advantages_min": float(advantages.min()),
-        "advantages_max": float(advantages.max()),
-        "group_means_mean": float(group_means.mean()),
-        "group_means_std": float(group_means.std()),
     }
 
     if normalize_by_std:
@@ -117,8 +111,6 @@ def compute_group_normalized_rewards(
         metadata.update({
             "group_stds_mean": float(group_stds_flat.mean()),
             "group_stds_std": float(group_stds_flat.std()),
-            "group_stds_min": float(group_stds_flat.min()),
-            "group_stds_max": float(group_stds_flat.max()),
         })
 
     return advantages, raw_rewards, metadata
@@ -282,12 +274,10 @@ def compute_policy_gradient_loss(
             policy_log_probs=policy_log_probs,
         )
 
-        # Compute basic metadata for raw rewards
+        # Basic metadata
         metadata = {
             "raw_rewards_mean": raw_rewards.mean(),
             "raw_rewards_std": raw_rewards.std(),
-            "raw_rewards_min": raw_rewards.min(),
-            "raw_rewards_max": raw_rewards.max(),
         }
 
     elif loss_type == "reinforce_with_baseline":
@@ -300,12 +290,10 @@ def compute_policy_gradient_loss(
             policy_log_probs=policy_log_probs,
         )
 
-        # Compute basic metadata for advantages
+        # Basic metadata
         metadata = {
             "advantages_mean": advantages.mean(),
             "advantages_std": advantages.std(),
-            "advantages_min": advantages.min(),
-            "advantages_max": advantages.max(),
         }
 
     elif loss_type == "grpo_clip":
@@ -445,19 +433,12 @@ def grpo_microbatch_train_step(
     # Step 5: Backpropagate gradients
     scaled_loss.backward()
 
-    # Step 6: Prepare metadata for logging
-    num_masked_tokens = response_mask.sum()
-
+    # Step 6: Prepare minimal metadata for logging (loss-specific only)
     metadata = {
-        **loss_metadata,  # Include metadata from policy gradient computation
+        **loss_metadata,
+        "batch_loss": batch_loss.detach(),
         "per_example_loss_mean": per_example_loss.mean().detach(),
         "per_example_loss_std": per_example_loss.std().detach(),
-        "batch_loss": batch_loss.detach(),
-        "scaled_loss": scaled_loss.detach(),
-        "num_masked_tokens": num_masked_tokens.detach(),
-        "batch_size": torch.tensor(batch_size),
-        "sequence_length": torch.tensor(sequence_length),
-        "gradient_accumulation_steps": torch.tensor(gradient_accumulation_steps),
     }
 
     # Return the scaled loss for logging (this is what was actually used for backprop)
