@@ -1,5 +1,12 @@
 # Quick Setup Guide for Policy Gradient Experiments
 
+## Quickstart (Recommended)
+Run the following in your terminal:
+```bash
+bash setup.sh
+```
+This script automates all steps below, including dependency installation, model download, and verification.
+
 ## Prerequisites
 - Ubuntu VM with NVIDIA H100 GPUs
 - CUDA 12.6+ drivers installed
