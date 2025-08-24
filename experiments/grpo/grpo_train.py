@@ -5,49 +5,43 @@ Implements Algorithm 3 from the GRPO paper.
 """
 
 # Ensure repository root is on sys.path for absolute imports
-import warnings
 import os
-import atexit
-import json
-import random
-import math
-import copy
-from typing import List, Dict, Tuple, Any, Optional
-from datetime import datetime
-import torch
-import wandb
-import numpy as np
-import typer
-from experiments.grpo.config_schema import GRPOTrainConfig
-from experiments.grpo.grpo_utils import (
-    compute_group_normalized_rewards,
-    grpo_microbatch_train_step
-)
-from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
-from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy, compute_log_probs_for_responses
-from utils.drgrpo_grader import r1_zero_reward_fn
-from utils.model_utils import setup_model_and_tokenizer
-from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
+# Set PyTorch env vars before importing torch
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+os.environ.setdefault('TORCH_LOGS', '-inductor')
+from pathlib import Path
+import sys
 from utils.inference_utils import (
     init_inference_model_from,
     generate_grouped_responses,
     greedy_generate_responses,
     compute_reward_metrics,
 )
-import sys
-from pathlib import Path
+from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
+from utils.model_utils import setup_model_and_tokenizer
+from utils.drgrpo_grader import r1_zero_reward_fn
+from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy, compute_log_probs_for_responses
+from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
+from experiments.grpo.grpo_utils import (
+    compute_group_normalized_rewards,
+    grpo_microbatch_train_step
+)
+from experiments.grpo.config_schema import GRPOTrainConfig
+import typer
+import numpy as np
+import wandb
+import torch
+from datetime import datetime
+from typing import List, Dict, Tuple, Any, Optional
+import copy
+import math
+import random
+import json
+import atexit
+import warnings
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-
-# Set memory allocation config and logging options before any PyTorch imports
-os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
-# Reduce verbose PyTorch logging and error verbosity
-# Use valid TORCH_LOGS syntax: optional +/- prefix, no equals. "-inductor" => ERROR level.
-# Quiet inductor logs and avoid empty string bug
-os.environ.setdefault('TORCH_LOGS', '-inductor')
-os.environ.setdefault('PYTORCH_DISABLE_STACK_TRACE',
-                      '1')  # Reduce stack trace verbosity
 
 
 # Suppress massive tensor dumps and model architecture in error messages to keep logs clean
