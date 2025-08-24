@@ -299,7 +299,7 @@ def train_on_rollout_batch(
     optimizer.zero_grad()
     # Optional GradScaler for fp16
     use_fp16_scaler = (device.type == "cuda" and config.torch_dtype == torch.float16)
-    scaler = torch.amp.GradScaler(device_type="cuda", enabled=use_fp16_scaler)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_fp16_scaler)
 
     # Microbatch accumulation with per-group optimizer steps
     total_microbatches = (
@@ -758,13 +758,13 @@ def main(
         # Log under eval/* namespace; use step=-1 so it appears before step 0
         if wandb.run is not None:
             _payload = {
-                "step": -1,
+                "step": 0,
                 "eval/accuracy": float(pre_val_metrics.get("val_accuracy", 0.0)),
                 "eval/format_accuracy": float(pre_val_metrics.get("val_format_accuracy", 0.0)),
                 "eval/answer_accuracy": float(pre_val_metrics.get("val_answer_accuracy", 0.0)),
                 "eval/score": float(pre_val_metrics.get("val_accuracy", 0.0)),
             }
-            wandb.log(_payload, step=-1)
+            wandb.log(_payload)
         print(f"Pre-training validation: {pre_val_metrics}")
     except Exception as _e:
         # Non-fatal; continue with training even if pre-eval fails
@@ -805,7 +805,7 @@ def main(
             )
             # Log metrics under train/* namespace aligned to common step
             if wandb.run is not None:
-                _train_payload = {"step": step}
+                _train_payload = {"step": step + 1}
                 for _k, _v in step_metrics.items():
                     if _k == "step":
                         continue
@@ -819,7 +819,7 @@ def main(
                     else:
                         _name = f"train/{_k}"
                     _train_payload[_name] = float(_v) if isinstance(_v, (int, float, np.floating)) else _v
-                wandb.log(_train_payload, step=step)
+                wandb.log(_train_payload)
             print(f"Step {step + 1} metrics: {step_metrics}")
 
             # Periodic validation
@@ -837,13 +837,13 @@ def main(
                 )
                 if wandb.run is not None:
                     _payload = {
-                        "step": step,
+                        "step": step + 1,
                         "eval/accuracy": float(val_metrics.get("val_accuracy", 0.0)),
                         "eval/format_accuracy": float(val_metrics.get("val_format_accuracy", 0.0)),
                         "eval/answer_accuracy": float(val_metrics.get("val_answer_accuracy", 0.0)),
                         "eval/score": float(val_metrics.get("val_accuracy", 0.0)),
                     }
-                    wandb.log(_payload, step=step)
+                    wandb.log(_payload)
                 print(f"Validation metrics: {val_metrics}")
 
             # Periodic checkpoint saving
