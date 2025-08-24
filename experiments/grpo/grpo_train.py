@@ -130,6 +130,14 @@ def setup_wandb(config: GRPOTrainConfig, config_path: Optional[str] = None):
         config=config.__dict__,
         save_code=True,
     )
+    # Define metric namespaces aligned to a single step key to avoid duplicate charts
+    try:
+        wandb.define_metric("step")
+        wandb.define_metric("train/*", step_metric="step")
+        wandb.define_metric("eval/*", step_metric="step")
+        wandb.define_metric("eval/score", summary="max")
+    except Exception:
+        pass
     # Persist the unique run name back into the config for downstream use (e.g., checkpoint paths)
     try:
         config.run_name = unique_run_name
@@ -286,7 +294,6 @@ def train_on_rollout_batch(
     processed_microbatches = 0
     summarized_metadata = {}
     sum_clip_fraction = 0.0
-    sum_entropy = 0.0
 
     # Zero gradients at start
     optimizer.zero_grad()
@@ -391,19 +398,11 @@ def train_on_rollout_batch(
         processed_microbatches += 1
 
         if microbatch_index == 0:
-            summarized: dict[str, float | int | bool] = {}
-            for k, v in metadata.items():
-                if torch.is_tensor(v):
-                    if v.numel() == 1:
-                        summarized[k] = v.item()
-                else:
-                    summarized[k] = v
-            summarized_metadata = summarized
+            # Only capture loss-specific clip stats for GRPO-Clip (already averaged separately)
+            summarized_metadata = {}
 
         if config.loss_type == "grpo_clip" and "clip_fraction" in metadata:
             sum_clip_fraction += metadata["clip_fraction"]
-
-        sum_entropy += 0.0
 
         # If end of accumulation group or last microbatch, take optimizer step
         is_end_of_group = ((microbatch_index + 1) % config.gradient_accumulation_steps ==
@@ -426,19 +425,16 @@ def train_on_rollout_batch(
     avg_true_batch_loss = sum_true_batch_loss / max(1, processed_microbatches)
     avg_clip_fraction = sum_clip_fraction / \
         max(1, processed_microbatches) if config.loss_type == "grpo_clip" else 0.0
-    avg_entropy = sum_entropy / max(1, processed_microbatches)
     avg_grad_norm = sum_grad_norm / max(1, optimizer_update_count)
 
     return {
         "train_loss": avg_loss,
         "train_true_loss": avg_true_batch_loss,
         "grad_norm": avg_grad_norm,
-        "token_entropy": avg_entropy,
         "clip_fraction": avg_clip_fraction,
         "train_format_reward": np.mean(train_rewards["format"]),
         "train_answer_reward": np.mean(train_rewards["answer"]),
         "train_total_reward": np.mean(train_rewards["total"]),
-        "num_microbatches": processed_microbatches,
         "num_optimizer_updates": optimizer_update_count,
         **summarized_metadata
     }
@@ -532,9 +528,6 @@ def run_grpo_step(
     # Step-wise metrics only
     metrics = {
         "step": step + 1,
-        "rollout_batch_size": len(all_responses),
-        "n_prompts": config.n_prompts_per_rollout_batch,
-        "group_size": config.group_size,
         **reward_metadata,
     }
     if epoch_metrics:
@@ -762,9 +755,16 @@ def main(
             config=config_obj,
             step=-1,
         )
-        # Log onto the same keys/series as later evals; use step=-1 so it appears before step 0
+        # Log under eval/* namespace; use step=-1 so it appears before step 0
         if wandb.run is not None:
-            wandb.log(pre_val_metrics, step=-1)
+            _payload = {
+                "step": -1,
+                "eval/accuracy": float(pre_val_metrics.get("val_accuracy", 0.0)),
+                "eval/format_accuracy": float(pre_val_metrics.get("val_format_accuracy", 0.0)),
+                "eval/answer_accuracy": float(pre_val_metrics.get("val_answer_accuracy", 0.0)),
+                "eval/score": float(pre_val_metrics.get("val_accuracy", 0.0)),
+            }
+            wandb.log(_payload, step=-1)
         print(f"Pre-training validation: {pre_val_metrics}")
     except Exception as _e:
         # Non-fatal; continue with training even if pre-eval fails
@@ -803,10 +803,23 @@ def main(
                 device=device,
                 step=step,
             )
-
-            # Log metrics
+            # Log metrics under train/* namespace aligned to common step
             if wandb.run is not None:
-                wandb.log(step_metrics, step=step)
+                _train_payload = {"step": step}
+                for _k, _v in step_metrics.items():
+                    if _k == "step":
+                        continue
+                    # Map known training-prefixed keys to concise names
+                    if _k.startswith("train_"):
+                        _name = f"train/{_k[len('train_') :]}"
+                    elif _k.startswith("memory_"):
+                        _name = f"system/{_k}"
+                    elif _k in {"grad_norm", "clip_fraction", "num_optimizer_updates"}:
+                        _name = f"train/{_k}"
+                    else:
+                        _name = f"train/{_k}"
+                    _train_payload[_name] = float(_v) if isinstance(_v, (int, float, np.floating)) else _v
+                wandb.log(_train_payload, step=step)
             print(f"Step {step + 1} metrics: {step_metrics}")
 
             # Periodic validation
@@ -823,7 +836,14 @@ def main(
                     step=step,
                 )
                 if wandb.run is not None:
-                    wandb.log(val_metrics, step=step)
+                    _payload = {
+                        "step": step,
+                        "eval/accuracy": float(val_metrics.get("val_accuracy", 0.0)),
+                        "eval/format_accuracy": float(val_metrics.get("val_format_accuracy", 0.0)),
+                        "eval/answer_accuracy": float(val_metrics.get("val_answer_accuracy", 0.0)),
+                        "eval/score": float(val_metrics.get("val_accuracy", 0.0)),
+                    }
+                    wandb.log(_payload, step=step)
                 print(f"Validation metrics: {val_metrics}")
 
             # Periodic checkpoint saving
