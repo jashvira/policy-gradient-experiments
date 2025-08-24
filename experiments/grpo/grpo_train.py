@@ -212,7 +212,8 @@ def sample_rollout_batch(
         prompts=prompts,
         group_size=group_size,
         max_new_tokens=config.sampling_max_tokens,
-        min_new_tokens=getattr(config, "sampling_min_tokens", 0),
+        # Ensure at least one generated token to avoid empty response masks
+        min_new_tokens=max(1, int(getattr(config, "sampling_min_tokens", 0))),
         sampling_temperature=config.sampling_temperature,
         sampling_top_p=config.sampling_top_p,
         stop_strings=stop_strings,

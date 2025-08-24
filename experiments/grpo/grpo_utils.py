@@ -450,6 +450,8 @@ def grpo_microbatch_train_step(
         # Average per example over response tokens, then mean over batch
         per_example_loss = masked_mean(
             per_token_loss, response_mask.to(per_token_loss.dtype), dim=1)
+        # Guard: if a row has zero masked tokens, masked_mean returns NaN; treat as 0 loss for that example
+        per_example_loss = torch.nan_to_num(per_example_loss, nan=0.0)
         batch_loss = per_example_loss.mean()
     else:
         # Sum over all masked tokens across the microbatch, then divide by batch size
