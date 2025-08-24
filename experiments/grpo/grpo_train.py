@@ -766,10 +766,11 @@ def main(
         if wandb.run is not None:
             _payload = {
                 "step": 0,
-                "eval/accuracy": float(pre_val_metrics.get("val_accuracy", 0.0)),
+                # Single primary metric for validation performance
+                "eval/score": float(pre_val_metrics.get("val_accuracy", 0.0)),
+                # Keep the decomposed accuracies for diagnostics
                 "eval/format_accuracy": float(pre_val_metrics.get("val_format_accuracy", 0.0)),
                 "eval/answer_accuracy": float(pre_val_metrics.get("val_answer_accuracy", 0.0)),
-                "eval/score": float(pre_val_metrics.get("val_accuracy", 0.0)),
             }
             wandb.log(_payload)
         print(f"Pre-training validation: {pre_val_metrics}")
@@ -825,7 +826,14 @@ def main(
                         _name = f"train/{_k}"
                     else:
                         _name = f"train/{_k}"
-                    _train_payload[_name] = float(_v) if isinstance(_v, (int, float, np.floating)) else _v
+                    # Coerce scalar tensors to float to avoid mixed-type logging
+                    try:
+                        if hasattr(_v, "detach") and hasattr(_v, "item"):
+                            _train_payload[_name] = float(_v.detach().cpu().item())
+                        else:
+                            _train_payload[_name] = float(_v) if isinstance(_v, (int, float, np.floating)) else _v
+                    except Exception:
+                        _train_payload[_name] = _v
                 wandb.log(_train_payload)
             print(f"Step {step + 1} metrics: {step_metrics}")
 
@@ -845,10 +853,11 @@ def main(
                 if wandb.run is not None:
                     _payload = {
                         "step": step + 1,
-                        "eval/accuracy": float(val_metrics.get("val_accuracy", 0.0)),
+                        # Single primary validation metric
+                        "eval/score": float(val_metrics.get("val_accuracy", 0.0)),
+                        # Diagnostics
                         "eval/format_accuracy": float(val_metrics.get("val_format_accuracy", 0.0)),
                         "eval/answer_accuracy": float(val_metrics.get("val_answer_accuracy", 0.0)),
-                        "eval/score": float(val_metrics.get("val_accuracy", 0.0)),
                     }
                     wandb.log(_payload)
                 print(f"Validation metrics: {val_metrics}")
