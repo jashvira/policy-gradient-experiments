@@ -228,7 +228,6 @@ def compute_reward_metrics(
         "val_accuracy": overall_correct / total if total else 0.0,
         "val_format_accuracy": format_correct / total if total else 0.0,
         "val_answer_accuracy": answer_correct / total if total else 0.0,
-        "val_total": total,
     }
 
 

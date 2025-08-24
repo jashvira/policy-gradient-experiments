@@ -286,11 +286,8 @@ def compute_policy_gradient_loss(
             policy_log_probs=policy_log_probs,
         )
 
-        # Basic metadata
-        metadata = {
-            "raw_rewards_mean": raw_rewards.mean(),
-            "raw_rewards_std": raw_rewards.std(),
-        }
+        # No additional metadata (avoid duplicates with step-level reward stats)
+        metadata = {}
 
     elif loss_type == "reinforce_with_baseline":
         # Use pre-computed advantages (group-normalised rewards)
@@ -303,11 +300,8 @@ def compute_policy_gradient_loss(
             policy_log_probs=policy_log_probs,
         )
 
-        # Basic metadata
-        metadata = {
-            "advantages_mean": advantages.mean(),
-            "advantages_std": advantages.std(),
-        }
+        # No additional metadata (avoid duplicates with step-level advantage stats)
+        metadata = {}
 
     elif loss_type == "grpo_clip":
         # Use GRPO-Clip loss with advantages and old policy log probs
@@ -475,14 +469,11 @@ def grpo_microbatch_train_step(
         scaled_loss.backward()
 
     # Step 6: Prepare minimal metadata for logging (loss-specific only)
+    # Only expose minimal metadata needed by the caller for aggregation
+    # Keep any loss-specific fields (e.g., clip_fraction) and the unscaled batch loss
     metadata = {
         **loss_metadata,
         "batch_loss": batch_loss.detach(),
-        # Only present for per_example_mean path; set to NaN otherwise for consistency
-        "per_example_loss_mean": (per_example_loss.mean().detach() if seq_loss_reduction == "per_example_mean" else torch.tensor(float("nan"), device=per_token_loss.device)),
-        "per_example_loss_std": (per_example_loss.std().detach() if seq_loss_reduction == "per_example_mean" else torch.tensor(float("nan"), device=per_token_loss.device)),
-        "seq_loss_reduction": torch.tensor(0 if seq_loss_reduction == "per_example_mean" else 1, device=per_token_loss.device),
-        "accumulation_denominator": torch.tensor(denom, device=per_token_loss.device),
     }
 
     # Return the scaled loss for logging (this is what was actually used for backprop)
