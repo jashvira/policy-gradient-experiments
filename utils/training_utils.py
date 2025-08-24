@@ -286,7 +286,7 @@ def log_generations(
     # HF generation
     pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
     eos_id = tokenizer.eos_token_id
-    with torch.no_grad():
+    with torch.inference_mode():
         enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
         input_ids = enc["input_ids"].to(device)
         attn_mask = enc.get("attention_mask")
@@ -321,7 +321,7 @@ def log_generations(
     concat_input_ids = tokenization["input_ids"].to(device)
     concat_labels = tokenization["labels"].to(device)
     response_mask = tokenization["response_mask"].to(device)
-    with torch.no_grad():
+    with torch.inference_mode():
         scoring = get_response_log_probs(
             model=model,
             input_ids=concat_input_ids,

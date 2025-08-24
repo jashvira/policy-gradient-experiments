@@ -333,13 +333,20 @@ def train_on_rollout_batch(
                 eval_device, non_blocking=True)
             lbl_ev = labels_cpu[slice_start:slice_end].to(
                 eval_device, non_blocking=True)
-            old_scores = get_response_log_probs(
-                model=inference_model,
-                input_ids=ids_ev,
-                labels=lbl_ev,
-                return_token_entropy=False,
-                requires_grad=False,
-            )
+            # Ensure dropout/etc. are disabled exactly at use-site
+            _was_training_ref = inference_model.training
+            inference_model.eval()
+            try:
+                old_scores = get_response_log_probs(
+                    model=inference_model,
+                    input_ids=ids_ev,
+                    labels=lbl_ev,
+                    return_token_entropy=False,
+                    requires_grad=False,
+                )
+            finally:
+                if _was_training_ref:
+                    inference_model.train()
             micro_old_log_probs = old_scores["log_probs"].to(
                 device=device, dtype=config.torch_dtype, non_blocking=True
             )
@@ -694,17 +701,23 @@ def main(
     eval_device = torch.device(config_obj.eval_device)
     # Initialize inference/reference model from the uncompiled training model
     inference_model = init_inference_model_from(model, eval_device)
+    # Ensure strict eval mode for reference model (no dropout/BN updates)
+    inference_model.eval()
     for p in inference_model.parameters():
         p.requires_grad_(False)
     # Optionally compile inference model for faster forward passes
     try:
         inference_model = torch.compile(inference_model)
+        # Preserve eval mode after compile wrapping
+        inference_model.eval()
     except Exception:
         pass
 
     # Optional: compile model for faster training (compile after creating inference copy)
     try:
         model = torch.compile(model)
+        # Ensure training mode for the trainable model after compile
+        model.train()
     except Exception:
         pass
 
