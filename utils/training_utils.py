@@ -8,6 +8,7 @@ from torch import Tensor
 from transformers import PreTrainedTokenizerBase
 # Intentionally avoid importing vLLM here to keep training logging HF-only
 from typing import Callable, Dict, List, Optional, Tuple
+from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime
 import json
@@ -247,7 +248,9 @@ def compute_log_probs_for_responses(
     labels = tokenized["labels"].to(device)
     response_mask = tokenized["response_mask"].to(device)
 
-    with torch.autocast(device_type=device.type, dtype=torch_dtype):
+    use_amp = (device.type == "cuda") and (torch_dtype in (torch.float16, torch.bfloat16))
+    amp_ctx = torch.autocast(device_type=device.type, dtype=torch_dtype) if use_amp else torch.no_grad if False else nullcontext()
+    with amp_ctx:
         outputs = get_response_log_probs(
             model=model,
             input_ids=input_ids,

@@ -202,27 +202,33 @@ def compute_grpo_clip_loss(
 
     # Broadcast advantages over sequence length
     # Shape: (batch_size, 1) -> (batch_size, sequence_length)
-    broadcasted_advantages = advantages.expand(batch_size, sequence_length)
+    # Compute core ratio/clipping math in float32 for numerical stability.
+    model_dtype = policy_log_probs.dtype
+    broadcasted_advantages_f32 = advantages.to(torch.float32).expand(batch_size, sequence_length)
+    policy_log_probs_f32 = policy_log_probs.to(torch.float32)
+    old_log_probs_f32 = old_log_probs.to(torch.float32)
 
     # Compute importance sampling ratio: π_θ / π_θ_old
     # log(π_θ / π_θ_old) = log(π_θ) - log(π_θ_old)
-    log_ratio = policy_log_probs - old_log_probs
+    log_ratio = policy_log_probs_f32 - old_log_probs_f32
     ratio = torch.exp(log_ratio)
 
     # Compute unclipped policy gradient term: ratio * A_t
-    unclipped_loss = ratio * broadcasted_advantages
+    unclipped_loss = ratio * broadcasted_advantages_f32
 
     # Compute clipped policy gradient term: clip(ratio, 1-ε, 1+ε) * A_t
     clipped_ratio = torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
-    clipped_loss = clipped_ratio * broadcasted_advantages
+    clipped_loss = clipped_ratio * broadcasted_advantages_f32
 
     # Take minimum (which gives maximum loss since we negate at the end)
     min_loss = torch.min(unclipped_loss, clipped_loss)
 
     # Apply negative sign for loss (we want to minimize negative reward)
-    per_token_loss = -min_loss
+    per_token_loss_f32 = -min_loss
+    # Cast back to the model's dtype for downstream reductions/backprop
+    per_token_loss = per_token_loss_f32.to(model_dtype)
 
-    # Compute metadata for logging
+    # Compute metadata for logging (float32 mean is fine)
     # Track which tokens were clipped
     was_clipped = (clipped_loss < unclipped_loss).float()
 
@@ -387,6 +393,8 @@ def grpo_microbatch_train_step(
     cliprange: float | None = None,
     seq_loss_reduction: str = "per_example_mean",
     accumulation_denominator: int | None = None,
+    *,
+    grad_scaler: "torch.amp.GradScaler" | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Execute a forward-and-backward pass on a microbatch for GRPO training.
@@ -458,8 +466,11 @@ def grpo_microbatch_train_step(
         gradient_accumulation_steps)
     scaled_loss = batch_loss / denom
 
-    # Step 5: Backpropagate gradients
-    scaled_loss.backward()
+    # Step 5: Backpropagate gradients (support GradScaler for fp16)
+    if grad_scaler is not None:
+        grad_scaler.scale(scaled_loss).backward()
+    else:
+        scaled_loss.backward()
 
     # Step 6: Prepare minimal metadata for logging (loss-specific only)
     metadata = {

@@ -33,6 +33,7 @@ import wandb
 import torch
 from datetime import datetime
 from typing import List, Dict, Tuple, Any, Optional
+from contextlib import nullcontext
 import copy
 import math
 import random
@@ -288,6 +289,9 @@ def train_on_rollout_batch(
 
     # Zero gradients at start
     optimizer.zero_grad()
+    # Optional GradScaler for fp16
+    use_fp16_scaler = (device.type == "cuda" and config.torch_dtype == torch.float16)
+    scaler = torch.amp.GradScaler(device_type="cuda", enabled=use_fp16_scaler)
 
     # Microbatch accumulation with per-group optimizer steps
     total_microbatches = (
@@ -314,7 +318,10 @@ def train_on_rollout_batch(
         micro_response_mask = response_mask_cpu[slice_start:slice_end].to(
             device)
 
-        with torch.autocast(device_type=device.type, dtype=config.torch_dtype):
+        # Gate autocast by device and dtype to avoid unsupported paths
+        use_amp = (device.type == "cuda") and (config.torch_dtype in (torch.float16, torch.bfloat16))
+        amp_ctx = torch.autocast(device_type=device.type, dtype=config.torch_dtype) if use_amp else torch.no_grad if False else nullcontext()
+        with amp_ctx:
             policy_outputs = get_response_log_probs(
                 model=model,
                 input_ids=micro_input_ids,
@@ -369,6 +376,7 @@ def train_on_rollout_batch(
             seq_loss_reduction=getattr(
                 config, "seq_loss_reduction", "per_example_mean"),
             accumulation_denominator=int(group_size_for_accum),
+            grad_scaler=scaler if use_fp16_scaler else None,
         )
 
         sum_scaled_loss += loss.item()
@@ -400,9 +408,16 @@ def train_on_rollout_batch(
         is_end_of_group = ((microbatch_index + 1) % config.gradient_accumulation_steps ==
                            0) or ((microbatch_index + 1) == total_microbatches)
         if is_end_of_group:
+            # Unscale before gradient clipping when using GradScaler
+            if use_fp16_scaler:
+                scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=config.grad_clip)
-            optimizer.step()
+            if use_fp16_scaler:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             optimizer.zero_grad()
             optimizer_update_count += 1
             sum_grad_norm += float(grad_norm.item())
