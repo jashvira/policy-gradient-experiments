@@ -299,7 +299,7 @@ def train_on_rollout_batch(
     optimizer.zero_grad()
     # Optional GradScaler for fp16
     use_fp16_scaler = (device.type == "cuda" and config.torch_dtype == torch.float16)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_fp16_scaler)
+    scaler = torch.amp.GradScaler(device.type, enabled=use_fp16_scaler)
 
     # Microbatch accumulation with per-group optimizer steps
     total_microbatches = (
