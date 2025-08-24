@@ -5,7 +5,8 @@
 n_grpo_steps: 50
 rollout_batch_size: 256
 group_size: 8
-train_batch_size: 64  # On-policy: equals rollout_batch_size
+# On-policy: equals rollout_batch_size;
+train_batch_size: 64
 epochs_per_rollout_batch: 4
 
 # Generation/sampling
@@ -19,11 +20,12 @@ loss_type: "grpo_clip"
 use_std_normalization: true
 advantage_eps: 1.0e-6
 cliprange: 0.2  # For grpo_clip loss type
+seq_loss_reduction: "masked_normalize"
 
 # Optimization
 learning_rate: 1.0e-5
 lr: 1.0e-5
-gradient_accumulation_steps: 32  # microbatch size is 8 (256/32)
+gradient_accumulation_steps: 32  # micro_train_batch_size is 2 (train_batch_size/gradient_accumulation_steps)
 weight_decay: 0.0
 adam_beta1: 0.9
 adam_beta2: 0.95

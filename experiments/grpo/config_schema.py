@@ -1,4 +1,5 @@
 from __future__ import annotations
+from utils.config_base import BaseTrainConfig
 
 from dataclasses import dataclass
 import torch
@@ -10,8 +11,6 @@ import sys
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-
-from utils.config_base import BaseTrainConfig
 
 
 @dataclass
@@ -32,11 +31,16 @@ class GRPOTrainConfig(BaseTrainConfig):
     sampling_top_p: float = 1.0
 
     # Loss function configuration
-    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"] = "reinforce_with_baseline"
+    loss_type: Literal["no_baseline", "reinforce_with_baseline",
+                       "grpo_clip"] = "reinforce_with_baseline"
     use_std_normalization: bool = True
     advantage_eps: float = 1e-6
     cliprange: float = 0.2  # For grpo_clip loss type
-
+    # Reduction applied over response tokens within each sequence
+    # "per_example_mean": average loss per example over response tokens, then mean over batch
+    # "masked_normalize": sum loss over all response tokens in microbatch, divide by batch size
+    seq_loss_reduction: Literal["per_example_mean",
+                                "masked_normalize"] = "per_example_mean"
 
     # Numerical precision and consistency settings
     compute_dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
@@ -128,5 +132,7 @@ class GRPOTrainConfig(BaseTrainConfig):
 
         print(f"GRPO Config derived values:")
         print(f"  micro_train_batch_size: {self.micro_train_batch_size}")
-        print(f"  n_prompts_per_rollout_batch: {self.n_prompts_per_rollout_batch}")
-        print(f"  n_microbatches_per_rollout_batch: {self.n_microbatches_per_rollout_batch}")
+        print(
+            f"  n_prompts_per_rollout_batch: {self.n_prompts_per_rollout_batch}")
+        print(
+            f"  n_microbatches_per_rollout_batch: {self.n_microbatches_per_rollout_batch}")

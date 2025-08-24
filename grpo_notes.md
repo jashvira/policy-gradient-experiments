@@ -71,6 +71,59 @@
 - Mathematically identical results, drastically reduced memory footprint
 
 
+## Batch sizes and optimiser update counts (current implementation)
+
+- **micro_train_batch_size** = `train_batch_size / gradient_accumulation_steps`
+- **updates_per_epoch** = `ceil(rollout_batch_size / train_batch_size)`
+- **microbatches_per_epoch** = `updates_per_epoch × gradient_accumulation_steps`
+- **updates_per_grpo_step** = `epochs_per_rollout_batch × updates_per_epoch`
+
+Implementation detail:
+- We step the optimiser every `gradient_accumulation_steps` microbatches.
+- The final partial group (if `rollout_batch_size` isn’t divisible) is scaled by the actual number of microbatches in that group to keep gradients correctly normalised.
+
+Interpretation of knobs:
+- **rollout_batch_size**: number of samples collected per GRPO step.
+- **train_batch_size**: target number of examples per optimiser update (controls update frequency).
+- **gradient_accumulation_steps**: splits each train-batch into microbatches to fit memory; does not change the total signal when scaling is correct.
+- **epochs_per_rollout_batch**: number of passes over the same rollouts; `> 1` yields approximate on‑policy (PPO‑style) updates within the step.
+
+Example (succinct walkthrough + pseudocode):
+- Config: `rollout_batch_size=256`, `train_batch_size=64`, `gradient_accumulation_steps=32`, `epochs_per_rollout_batch=4`.
+- Derived: `micro_train_batch_size=2`, `total_microbatches=128`, `updates_per_epoch=4`, `updates_per_grpo_step=16`.
+
+Pseudocode (matches `train_on_rollout_batch`):
+```python
+# given: R=256, B=64, G=32, E=4
+micro = B // G                 # 2
+total_micro = ceil(R / micro)  # 128
+
+for epoch in range(E):
+    zero_grad()
+    for i in range(total_micro):
+        start = i * micro; end = min(start + micro, R)
+        group_start = i - (i % G)
+        group_size = min(G, total_micro - group_start)
+
+        # policy and old-policy log-probs
+        logp = policy.forward(ids[start:end])
+        old_logp = old_policy.forward(ids[start:end])  # only for grpo_clip
+
+        # per-token GRPO(-Clip) loss → reduce over response tokens
+        per_token = grpo_clip_loss(logp, old_logp, advantages[start:end])
+        batch_loss = reduce_over_response_tokens(per_token)  # unscaled
+
+        # scale by actual accumulation group size (handles last partial group)
+        scaled = batch_loss / group_size
+        scaled.backward()
+
+        # step at group boundary or on last microbatch
+        if ((i + 1) % G == 0) or ((i + 1) == total_micro):
+            clip_grad_norm_()
+            optimizer.step(); zero_grad()
+```
+
+
 
 
 - Can we reuse stuff for the epochs?

@@ -5,51 +5,49 @@ Implements Algorithm 3 from the GRPO paper.
 """
 
 # Ensure repository root is on sys.path for absolute imports
-import sys
-from pathlib import Path
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
+import warnings
+import os
+import atexit
+import json
+import random
+import math
+import copy
+from typing import List, Dict, Tuple, Any, Optional
+from datetime import datetime
+import torch
+import wandb
+import numpy as np
+import typer
+from experiments.grpo.config_schema import GRPOTrainConfig
+from experiments.grpo.grpo_utils import (
+    compute_group_normalized_rewards,
+    grpo_microbatch_train_step
+)
+from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
+from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy, compute_log_probs_for_responses
+from utils.drgrpo_grader import r1_zero_reward_fn
+from utils.model_utils import setup_model_and_tokenizer
+from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
 from utils.inference_utils import (
     init_inference_model_from,
     generate_grouped_responses,
     greedy_generate_responses,
     compute_reward_metrics,
 )
-from utils.optim_sched_utils import build_adamw, build_warmup_then_scheduler
-from utils.model_utils import setup_model_and_tokenizer
-from utils.drgrpo_grader import r1_zero_reward_fn
-from utils.training_utils import tokenize_prompt_and_output, get_response_log_probs, compute_entropy, compute_log_probs_for_responses
-from utils.math_data import load_math_train, load_math_validation, format_with_r1_zero_prompt
-from experiments.grpo.grpo_utils import (
-    compute_group_normalized_rewards,
-    grpo_microbatch_train_step
-)
-from experiments.grpo.config_schema import GRPOTrainConfig
-import typer
-import numpy as np
-import wandb
-import torch
-from datetime import datetime
-from typing import List, Dict, Tuple, Any, Optional
-import copy
-import math
-import random
-import json
-import atexit
-from pathlib import Path
 import sys
-import os
+from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 # Set memory allocation config and logging options before any PyTorch imports
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 # Reduce verbose PyTorch logging and error verbosity
 # Use valid TORCH_LOGS syntax: optional +/- prefix, no equals. "-inductor" => ERROR level.
-os.environ.setdefault('TORCH_LOGS', '-inductor')  # Quiet inductor logs and avoid empty string bug
-os.environ.setdefault('PYTORCH_DISABLE_STACK_TRACE', '1')  # Reduce stack trace verbosity
-
-
-
+# Quiet inductor logs and avoid empty string bug
+os.environ.setdefault('TORCH_LOGS', '-inductor')
+os.environ.setdefault('PYTORCH_DISABLE_STACK_TRACE',
+                      '1')  # Reduce stack trace verbosity
 
 
 # Suppress massive tensor dumps and model architecture in error messages to keep logs clean
@@ -90,15 +88,16 @@ def suppress_large_tensor_repr():
     # Note: numpy arrays are immutable types, so we can't patch them
     # but torch tensor patching is sufficient for our use case
 
+
 # Set up clean logging once at module level
 suppress_large_tensor_repr()
 
 # Configure cleaner error handling and warnings
-import warnings
 # Filter out common but non-critical warnings that clutter logs
 warnings.filterwarnings('ignore', message='.*TensorFloat32.*')
 warnings.filterwarnings('ignore', message='.*flash_attention.*')
-warnings.filterwarnings('ignore', category=UserWarning, module='torch._inductor.*')
+warnings.filterwarnings('ignore', category=UserWarning,
+                        module='torch._inductor.*')
 # Suppress LaTeX macro warnings from grader
 warnings.filterwarnings('ignore', message='.*macro.*failed its substitution.*')
 warnings.filterwarnings('ignore', message='.*Error in configuration.*')
@@ -164,7 +163,8 @@ def setup_wandb(config: GRPOTrainConfig, config_path: Optional[str] = None):
             )
             # Preserve original filename (e.g., grpo_clip.yaml)
             artifact.add_file(str(config_path), name=Path(config_path).name)
-            wandb.log_artifact(artifact, aliases=["latest", f"run:{unique_run_name}", f"sha256:{short_sha}"])
+            wandb.log_artifact(artifact, aliases=[
+                               "latest", f"run:{unique_run_name}", f"sha256:{short_sha}"])
             # Also save the file into the run's file set for convenience
             try:
                 wandb.save(str(config_path))
@@ -201,12 +201,11 @@ def sample_rollout_batch(
     # Sample n_prompts questions
     indices = random.sample(range(len(problems)),
                             min(n_prompts, len(problems)))
-    sampled_problems = [problems[i] for i in indices]
-    sampled_answers = [answers[i] for i in indices]
-
-    # Format prompts with r1_zero format
-    prompts = [format_with_r1_zero_prompt(
-        problem) for problem in sampled_problems]
+    # Sample problems and format prompts in one pass
+    prompts, sampled_answers = zip(*(
+        (format_with_r1_zero_prompt(problems[i]), answers[i]) for i in indices
+    ))
+    prompts, sampled_answers = list(prompts), list(sampled_answers)
 
     print(
         f"Generating rollout batch: {n_prompts} prompts × {group_size} responses = {n_prompts * group_size} total")
@@ -244,7 +243,6 @@ def sample_rollout_batch(
     return all_prompts, all_responses, all_ground_truths
 
 
-
 def train_on_rollout_batch(
     model,
     tokenizer,
@@ -268,7 +266,8 @@ def train_on_rollout_batch(
     model.train()
 
     # Tokenize once on CPU to avoid holding large tensors on GPU
-    tokenized = tokenize_prompt_and_output(all_prompts, all_responses, tokenizer)
+    tokenized = tokenize_prompt_and_output(
+        all_prompts, all_responses, tokenizer)
     input_ids_cpu = tokenized["input_ids"]
     labels_cpu = tokenized["labels"]
     response_mask_cpu = tokenized["response_mask"]
@@ -284,26 +283,43 @@ def train_on_rollout_batch(
         train_rewards["total"].append(reward_dict.get("reward", 0.0))
 
     # Split into microbatches and train
-    batch_size = len(all_prompts)
-    micro_batch_size = config.micro_train_batch_size
-    total_loss = 0.0
-    step_count = 0
-    all_metadata = {}
-    total_clip_fraction = 0.0
-    total_entropy = 0.0
+    num_rollout_examples = len(all_prompts)
+    microbatchsize_examples = config.micro_train_batch_size
+    sum_scaled_loss = 0.0
+    sum_true_batch_loss = 0.0  # mean per-example masked loss before GA scaling
+    processed_microbatches = 0
+    summarized_metadata = {}
+    sum_clip_fraction = 0.0
+    sum_entropy = 0.0
 
     # Zero gradients at start
     optimizer.zero_grad()
 
-    for start_idx in range(0, batch_size, micro_batch_size):
-        end_idx = min(start_idx + micro_batch_size, batch_size)
+    # Microbatch accumulation with per-group optimizer steps
+    total_microbatches = (
+        num_rollout_examples + microbatchsize_examples - 1) // microbatchsize_examples
+    optimizer_update_count = 0
+    sum_grad_norm = 0.0
+
+    for microbatch_index in range(total_microbatches):
+        slice_start = microbatch_index * microbatchsize_examples
+        slice_end = min(slice_start + microbatchsize_examples,
+                        num_rollout_examples)
+
+        # Determine target denominator for this accumulation group
+        group_start_index = microbatch_index - \
+            (microbatch_index % config.gradient_accumulation_steps)
+        group_size_for_accum = min(
+            config.gradient_accumulation_steps,
+            total_microbatches - group_start_index,
+        )
 
         # Move microbatch slice to device and compute policy log-probs
-        micro_input_ids = input_ids_cpu[start_idx:end_idx].to(device)
-        micro_labels = labels_cpu[start_idx:end_idx].to(device)
-        micro_response_mask = response_mask_cpu[start_idx:end_idx].to(device)
+        micro_input_ids = input_ids_cpu[slice_start:slice_end].to(device)
+        micro_labels = labels_cpu[slice_start:slice_end].to(device)
+        micro_response_mask = response_mask_cpu[slice_start:slice_end].to(
+            device)
 
-        # Compute policy log-probs for this microbatch with gradients
         with torch.autocast(device_type=device.type, dtype=config.torch_dtype):
             policy_outputs = get_response_log_probs(
                 model=model,
@@ -315,13 +331,14 @@ def train_on_rollout_batch(
         micro_policy_log_probs = policy_outputs["log_probs"]
 
         # Extract other microbatch tensors
-        micro_advantages = advantages[start_idx:end_idx].unsqueeze(1)  # (micro_batch, 1)
+        micro_advantages = advantages[slice_start:slice_end].unsqueeze(1)
         micro_old_log_probs = None
         if config.loss_type == "grpo_clip":
-            # Compute old log-probs on eval device for this microbatch only using shared util
             eval_device = next(inference_model.parameters()).device
-            ids_ev = input_ids_cpu[start_idx:end_idx].to(eval_device, non_blocking=True)
-            lbl_ev = labels_cpu[start_idx:end_idx].to(eval_device, non_blocking=True)
+            ids_ev = input_ids_cpu[slice_start:slice_end].to(
+                eval_device, non_blocking=True)
+            lbl_ev = labels_cpu[slice_start:slice_end].to(
+                eval_device, non_blocking=True)
             old_scores = get_response_log_probs(
                 model=inference_model,
                 input_ids=ids_ev,
@@ -332,31 +349,38 @@ def train_on_rollout_batch(
             micro_old_log_probs = old_scores["log_probs"].to(
                 device=device, dtype=config.torch_dtype, non_blocking=True
             )
-            # Free eval slice
             del ids_ev, lbl_ev, old_scores
             try:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
 
-        # Run microbatch train step
+        # Run microbatch train step (scale by group_total)
         loss, metadata = grpo_microbatch_train_step(
             policy_log_probs=micro_policy_log_probs,
             response_mask=micro_response_mask,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             loss_type=config.loss_type,
-            raw_rewards=None,  # We use advantages, not raw rewards
+            raw_rewards=None,
             advantages=micro_advantages,
             old_log_probs=micro_old_log_probs,
             cliprange=config.cliprange if config.loss_type == "grpo_clip" else None,
+            seq_loss_reduction=getattr(
+                config, "seq_loss_reduction", "per_example_mean"),
+            accumulation_denominator=int(group_size_for_accum),
         )
 
-        total_loss += loss.item()
-        step_count += 1
+        sum_scaled_loss += loss.item()
+        # Aggregate unscaled batch loss from metadata
+        if "batch_loss" in metadata:
+            try:
+                sum_true_batch_loss += float(metadata["batch_loss"]) if not torch.is_tensor(
+                    metadata["batch_loss"]) else float(metadata["batch_loss"].item())
+            except Exception:
+                pass
+        processed_microbatches += 1
 
-        # Accumulate metadata from first microbatch for logging
-        if start_idx == 0:
-            # Only keep scalar items; upstream now returns scalar-only metadata
+        if microbatch_index == 0:
             summarized: dict[str, float | int | bool] = {}
             for k, v in metadata.items():
                 if torch.is_tensor(v):
@@ -364,35 +388,42 @@ def train_on_rollout_batch(
                         summarized[k] = v.item()
                 else:
                     summarized[k] = v
-            all_metadata = summarized
+            summarized_metadata = summarized
 
-        # Accumulate clip fraction if using grpo_clip
         if config.loss_type == "grpo_clip" and "clip_fraction" in metadata:
-            total_clip_fraction += metadata["clip_fraction"]
+            sum_clip_fraction += metadata["clip_fraction"]
 
-        # Skip token entropy computation to save memory
-        total_entropy += 0.0
+        sum_entropy += 0.0
 
-    # Take optimizer step after accumulating gradients and capture gradient norm
-    grad_norm = torch.nn.utils.clip_grad_norm_(
-        model.parameters(), max_norm=config.grad_clip)
-    optimizer.step()
-
-    avg_loss = total_loss / step_count
-    avg_clip_fraction = total_clip_fraction / \
-        step_count if config.loss_type == "grpo_clip" else 0.0
-    avg_entropy = total_entropy / step_count
+        # If end of accumulation group or last microbatch, take optimizer step
+        is_end_of_group = ((microbatch_index + 1) % config.gradient_accumulation_steps ==
+                           0) or ((microbatch_index + 1) == total_microbatches)
+        if is_end_of_group:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=config.grad_clip)
+            optimizer.step()
+            optimizer.zero_grad()
+            optimizer_update_count += 1
+            sum_grad_norm += float(grad_norm.item())
+    avg_loss = sum_scaled_loss / max(1, processed_microbatches)
+    avg_true_batch_loss = sum_true_batch_loss / max(1, processed_microbatches)
+    avg_clip_fraction = sum_clip_fraction / \
+        max(1, processed_microbatches) if config.loss_type == "grpo_clip" else 0.0
+    avg_entropy = sum_entropy / max(1, processed_microbatches)
+    avg_grad_norm = sum_grad_norm / max(1, optimizer_update_count)
 
     return {
         "train_loss": avg_loss,
-        "grad_norm": grad_norm.item(),
+        "train_true_loss": avg_true_batch_loss,
+        "grad_norm": avg_grad_norm,
         "token_entropy": avg_entropy,
         "clip_fraction": avg_clip_fraction,
         "train_format_reward": np.mean(train_rewards["format"]),
         "train_answer_reward": np.mean(train_rewards["answer"]),
         "train_total_reward": np.mean(train_rewards["total"]),
-        "num_microbatches": step_count,
-        **all_metadata
+        "num_microbatches": processed_microbatches,
+        "num_optimizer_updates": optimizer_update_count,
+        **summarized_metadata
     }
 
 
@@ -418,7 +449,8 @@ def run_grpo_step(
     log_all_gpu_memory(f"Step {step + 1} - Start")
 
     # Sample rollout batch (Algorithm 3, Line 5)
-    stop_strings = ["</answer>"] if hasattr(config, "use_answer_stop") and config.use_answer_stop else None
+    stop_strings = [
+        "</answer>"] if hasattr(config, "use_answer_stop") and config.use_answer_stop else None
     all_prompts, all_responses, all_ground_truths = sample_rollout_batch(
         problems=problems,
         answers=answers,
@@ -538,7 +570,8 @@ def copy_model_weights(source_model, target_model):
     try:
         if torch.cuda.is_available():
             # Synchronize target device to finalize copies before cleanup
-            torch.cuda.synchronize(device=next(target_model.parameters()).device)
+            torch.cuda.synchronize(device=next(
+                target_model.parameters()).device)
             torch.cuda.empty_cache()
     except Exception:
         pass
@@ -601,7 +634,8 @@ def evaluate_on_validation(
         from pathlib import Path as _Path
         from utils.training_utils import write_generations_from_samples as _write_gen
 
-        out_dir = _Path(config.val_log_dir) / _Path(getattr(config, "run_name", "grpo")) / f"val_step_{step + 1}"
+        out_dir = _Path(config.val_log_dir) / _Path(getattr(config,
+                                                            "run_name", "grpo")) / f"val_step_{step + 1}"
         sample_n = min(10, len(prompts))
         if sample_n > 0:
             saved = _write_gen(
@@ -697,8 +731,6 @@ def main(
     # Optional pre-training validation for baseline metrics and sanity check
     try:
         print("Running pre-training validation...")
-        # Ensure inference model has the latest weights
-        copy_model_weights(model, inference_model)
         pre_val_metrics = evaluate_on_validation(
             inference_model=inference_model,
             tokenizer=tokenizer,
@@ -785,7 +817,8 @@ def main(
         # Cleanup
         # Final save
         if config_obj.save_at_end:
-            final_save_path = Path(config_obj.save_dir) / Path(config_obj.run_name) / "final_model"
+            final_save_path = Path(config_obj.save_dir) / \
+                Path(config_obj.run_name) / "final_model"
             final_save_path.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(final_save_path)
             tokenizer.save_pretrained(final_save_path)

@@ -17,6 +17,7 @@
 from typing import Callable
 
 import torch
+from utils.training_utils import masked_normalize
 
 
 def compute_group_normalized_rewards(
@@ -88,9 +89,11 @@ def compute_group_normalized_rewards(
     group_means = grouped_rewards.mean(dim=1, keepdim=True)  # (n_groups, 1)
 
     if normalize_by_std:
-        group_stds = grouped_rewards.std(dim=1, keepdim=True, unbiased=True)  # (n_groups, 1)
+        group_stds = grouped_rewards.std(
+            dim=1, keepdim=True, unbiased=True)  # (n_groups, 1)
         # Normalize: (reward - mean) / (std + eps)
-        normalized_rewards = (grouped_rewards - group_means) / (group_stds + advantage_eps)
+        normalized_rewards = (grouped_rewards - group_means) / \
+            (group_stds + advantage_eps)
     else:
         # Normalize: reward - mean
         normalized_rewards = grouped_rewards - group_means
@@ -146,7 +149,8 @@ def compute_naive_policy_gradient_loss(
 
     # Broadcast rewards/advantages over sequence length
     # Shape: (batch_size, 1) -> (batch_size, sequence_length)
-    broadcasted_rewards = raw_rewards_or_advantages.expand(batch_size, sequence_length)
+    broadcasted_rewards = raw_rewards_or_advantages.expand(
+        batch_size, sequence_length)
 
     # Compute per-token policy gradient loss
     # Policy gradient: -reward * log_prob
@@ -262,12 +266,14 @@ def compute_policy_gradient_loss(
     """
     valid_loss_types = ["no_baseline", "reinforce_with_baseline", "grpo_clip"]
     if loss_type not in valid_loss_types:
-        raise ValueError(f"Invalid loss_type '{loss_type}'. Must be one of {valid_loss_types}")
+        raise ValueError(
+            f"Invalid loss_type '{loss_type}'. Must be one of {valid_loss_types}")
 
     if loss_type == "no_baseline":
         # Use raw rewards as advantages (no baseline subtraction)
         if raw_rewards is None:
-            raise ValueError("raw_rewards is required for loss_type='no_baseline'")
+            raise ValueError(
+                "raw_rewards is required for loss_type='no_baseline'")
 
         per_token_loss = compute_naive_policy_gradient_loss(
             raw_rewards_or_advantages=raw_rewards,
@@ -283,7 +289,8 @@ def compute_policy_gradient_loss(
     elif loss_type == "reinforce_with_baseline":
         # Use pre-computed advantages (group-normalised rewards)
         if advantages is None:
-            raise ValueError("advantages is required for loss_type='reinforce_with_baseline'")
+            raise ValueError(
+                "advantages is required for loss_type='reinforce_with_baseline'")
 
         per_token_loss = compute_naive_policy_gradient_loss(
             raw_rewards_or_advantages=advantages,
@@ -299,9 +306,11 @@ def compute_policy_gradient_loss(
     elif loss_type == "grpo_clip":
         # Use GRPO-Clip loss with advantages and old policy log probs
         if advantages is None:
-            raise ValueError("advantages is required for loss_type='grpo_clip'")
+            raise ValueError(
+                "advantages is required for loss_type='grpo_clip'")
         if old_log_probs is None:
-            raise ValueError("old_log_probs is required for loss_type='grpo_clip'")
+            raise ValueError(
+                "old_log_probs is required for loss_type='grpo_clip'")
         if cliprange is None:
             raise ValueError("cliprange is required for loss_type='grpo_clip'")
 
@@ -334,7 +343,8 @@ def masked_mean(
         torch.Tensor, the masked mean; shape matches tensor.mean(dim) semantics.
     """
     if tensor.shape != mask.shape:
-        raise ValueError(f"tensor and mask must have the same shape. Got tensor: {tensor.shape}, mask: {mask.shape}")
+        raise ValueError(
+            f"tensor and mask must have the same shape. Got tensor: {tensor.shape}, mask: {mask.shape}")
 
     # Convert mask to same dtype as tensor for computation
     mask_float = mask.to(dtype=tensor.dtype)
@@ -375,6 +385,8 @@ def grpo_microbatch_train_step(
     advantages: torch.Tensor | None = None,
     old_log_probs: torch.Tensor | None = None,
     cliprange: float | None = None,
+    seq_loss_reduction: str = "per_example_mean",
+    accumulation_denominator: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Execute a forward-and-backward pass on a microbatch for GRPO training.
@@ -418,17 +430,33 @@ def grpo_microbatch_train_step(
         cliprange=cliprange,
     )
 
-    # Step 2: Apply response mask and compute mean over sequence dimension
-    # Use masked_mean with dim=1 to average over sequence length (only response tokens)
-    per_example_loss = masked_mean(per_token_loss, response_mask.to(per_token_loss.dtype), dim=1)
+    # Step 2: Reduce token losses over sequence dimension according to config
+    seq_loss_reduction = str(seq_loss_reduction).lower()
+    if seq_loss_reduction not in {"per_example_mean", "masked_normalize"}:
+        raise ValueError(
+            f"Invalid seq_loss_reduction '{seq_loss_reduction}'. "
+            "Expected one of {'per_example_mean', 'masked_normalize'}"
+        )
 
-    # Step 3: Average over batch dimension
-    batch_loss = per_example_loss.mean()
+    if seq_loss_reduction == "per_example_mean":
+        # Average per example over response tokens, then mean over batch
+        per_example_loss = masked_mean(
+            per_token_loss, response_mask.to(per_token_loss.dtype), dim=1)
+        batch_loss = per_example_loss.mean()
+    else:
+        # Sum over all masked tokens across the microbatch, then divide by batch size
+        masked_sum = masked_normalize(
+            per_token_loss, response_mask, normalize_constant=1.0, dim=None
+        )
+        batch_loss = masked_sum / float(batch_size)
 
     # Step 4: Adjust for gradient accumulation steps
-    # Scale by 1/gradient_accumulation_steps so that when we accumulate gradients
-    # across multiple microbatches, the final gradient magnitude is correct
-    scaled_loss = batch_loss / gradient_accumulation_steps
+    # Scale by 1/denominator so that when we accumulate gradients across
+    # multiple microbatches, the final gradient magnitude is correct.
+    # Use provided accumulation_denominator for partial groups; otherwise fall back.
+    denom = float(accumulation_denominator) if accumulation_denominator is not None else float(
+        gradient_accumulation_steps)
+    scaled_loss = batch_loss / denom
 
     # Step 5: Backpropagate gradients
     scaled_loss.backward()
@@ -437,8 +465,11 @@ def grpo_microbatch_train_step(
     metadata = {
         **loss_metadata,
         "batch_loss": batch_loss.detach(),
-        "per_example_loss_mean": per_example_loss.mean().detach(),
-        "per_example_loss_std": per_example_loss.std().detach(),
+        # Only present for per_example_mean path; set to NaN otherwise for consistency
+        "per_example_loss_mean": (per_example_loss.mean().detach() if seq_loss_reduction == "per_example_mean" else torch.tensor(float("nan"), device=per_token_loss.device)),
+        "per_example_loss_std": (per_example_loss.std().detach() if seq_loss_reduction == "per_example_mean" else torch.tensor(float("nan"), device=per_token_loss.device)),
+        "seq_loss_reduction": torch.tensor(0 if seq_loss_reduction == "per_example_mean" else 1, device=per_token_loss.device),
+        "accumulation_denominator": torch.tensor(denom, device=per_token_loss.device),
     }
 
     # Return the scaled loss for logging (this is what was actually used for backprop)
