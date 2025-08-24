@@ -7,7 +7,7 @@ rollout_batch_size: 256
 group_size: 8
 # On-policy: equals rollout_batch_size;
 train_batch_size: 128
-epochs_per_rollout_batch: 4
+epochs_per_rollout_batch: 3
 
 # Generation/sampling
 sampling_temperature: 1.0
