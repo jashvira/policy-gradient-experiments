@@ -531,8 +531,15 @@ def run_grpo_step(
         **reward_metadata,
     }
     if epoch_metrics:
-        # Merge the single epoch's metrics directly (epochs_per_rollout_batch is typically 1)
+        # Merge the last epoch's metrics for most fields
         metrics.update(epoch_metrics[-1])
+        # Sum optimizer updates across all epochs within this step
+        try:
+            metrics["num_optimizer_updates"] = sum(
+                int(m.get("num_optimizer_updates", 0)) for m in epoch_metrics
+            )
+        except Exception:
+            pass
 
     log_all_gpu_memory(f"Step {step + 1} - End")
 
