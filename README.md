@@ -1,6 +1,8 @@
 # MATH Dataset Post-training
 
-Post-training experiments on the MATH dataset (Hendrycks et al.) for mathematical reasoning using policy gradient methods.
+Post-training experiments on the MATH dataset (Hendrycks et al.).
+
+This is a from scratch implementation of a basic post-training pipeline. Everything from REINFORCE to GPU handling is written in-house. All work was done on two rented H100s.
 
 ## SFT Results
 
