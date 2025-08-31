@@ -21,6 +21,7 @@ Supervised fine-tuning after data cleanse.
 
 - Model is trained with GRPO.
 - Accuracy reflects greedy eval on the 1024 validation set at checkpoints.
+- See [GRPO Notes](grpo_notes.md): rough notes for my understanding.
 
 ### GRPO Run Parameters
 

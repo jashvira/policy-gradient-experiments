@@ -122,10 +122,3 @@ for epoch in range(E):
             clip_grad_norm_()
             optimizer.step(); zero_grad()
 ```
-
-
-
-
-- Can we reuse stuff for the epochs?
-- probably need vllm for faster inference -- during eval as well as training
-- should have easy -> hard curriculum ideally
