@@ -1,0 +1,6 @@
+You are an expert Python programmer, and here is your task: {prompt} Your code should pass these tests:
+
+{tests}
+[BEGIN]
+{code}
+[DONE]

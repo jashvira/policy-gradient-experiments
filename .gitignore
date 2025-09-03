@@ -1,0 +1,47 @@
+# Python caches and bytecode
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.cache/
+
+# Virtual environments and local env files
+.venv/
+venv/
+.env
+.envrc
+.python-version
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS/editor noise
+.DS_Store
+.vscode/
+
+# Project outputs and large run artifacts
+wandb/
+logs/
+eval_runs/
+evaluation_results/
+model_checkpoints/
+
+# Local model and dataset caches
+.models/
+datasets/**
+!datasets/mbpp/**
+
+# Coverage reports
+*.coverage
+coverage.xml
+htmlcov/
