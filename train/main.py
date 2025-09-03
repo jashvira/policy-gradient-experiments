@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal MBPP evaluation scaffold using Verifiers (no bloat)."""
+"""MBPP evaluation scaffold using Verifiers."""
 
 import argparse
 import json
@@ -7,103 +7,156 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 
+# ============================================================================
+# Configuration & Argument Parsing
+# ============================================================================
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Minimal MBPP eval with Verifiers")
-    parser.add_argument("--dataset", type=str, default="valid", help="Split (train/valid/test/full) or JSONL path")
-    parser.add_argument("--data-dir", type=Path, default=Path("/home/jash404/RL_experiments/datasets/mbpp"), help="MBPP data dir")
-    parser.add_argument("--num-examples", type=int, default=10, help="Number of examples to run")
-    parser.add_argument("--model", type=str, default="llama-3.1-8b", help="Model name")
-    parser.add_argument("--evaluate", action="store_true", help="Run env.evaluate()")
-    parser.add_argument("--dry-run", action="store_true", help="Show config and exit")
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="MBPP evaluation with Verifiers")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="valid",
+        help="Split (train/valid/test/full) or JSONL path"
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("/home/jash404/RL_experiments/datasets/mbpp"),
+        help="MBPP data directory"
+    )
+    parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=10,
+        help="Number of examples to evaluate"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="qwen2.5-coder-1.5b",
+        help="Model name or path"
+    )
+    parser.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Run evaluation (default: dry run)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show config and example, then exit"
+    )
     return parser.parse_args()
 
 
+# ============================================================================
+# Dataset Loading
+# ============================================================================
+
 def resolve_dataset_path(dataset: str, data_dir: Path) -> Path:
+    """Resolve dataset string to actual file path."""
     if Path(dataset).exists():
         return Path(dataset)
+
     mapping = {
         "train": data_dir / "mbpp_train.jsonl",
         "valid": data_dir / "mbpp_valid.jsonl",
         "test": data_dir / "mbpp_test.jsonl",
         "full": data_dir / "mbpp.jsonl",
     }
+
     if dataset not in mapping:
-        raise ValueError(f"Invalid dataset '{dataset}'. Use one of {list(mapping.keys())} or a JSONL path.")
+        raise ValueError(f"Invalid dataset '{dataset}'. Use: {list(mapping.keys())} or JSONL path")
+
     path = mapping[dataset]
     if not path.exists():
-        raise FileNotFoundError(f"Dataset split '{dataset}' not found at {path}")
+        raise FileNotFoundError(f"Dataset '{dataset}' not found at {path}")
+
     return path
 
 
-def load_mbpp(path: Path, limit: Optional[int]) -> List[Dict[str, Any]]:
-    dataset: List[Dict[str, Any]] = []
+def load_mbpp(path: Path, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Load MBPP dataset from JSONL file."""
+    dataset = []
     with path.open("r", encoding="utf-8") as f:
         for i, line in enumerate(f):
             if limit is not None and i >= limit:
                 break
-            rec = json.loads(line)
+
+            rec = json.loads(line.strip())
             text = rec.get("text") or rec.get("question") or "Solve the task."
             dataset.append({"prompt": text})
+
     return dataset
 
 
+# ============================================================================
+# Evaluation Setup
+# ============================================================================
+
+def create_verifiers_env():
+    """Create Verifiers environment using the modular environment setup."""
+    try:
+        from eval.my_coder_env import load_environment
+    except ImportError:
+        raise ImportError("Environment module not found. Check eval/my_coder_env.py exists")
+
+    return load_environment()
+
+
+# ============================================================================
+# Main Logic
+# ============================================================================
+
 def main() -> None:
+    """Main evaluation logic."""
     args = parse_args()
+
+    # Load dataset (for display purposes only - env handles its own dataset)
     try:
         dataset_path = resolve_dataset_path(args.dataset, args.data_dir)
+        data = load_mbpp(dataset_path, args.num_examples)
     except Exception as e:
-        print(f"Error resolving dataset: {e}")
+        print(f"Error loading dataset: {e}")
         return
 
-    data = load_mbpp(dataset_path, args.num_examples)
-
-    print("Config:")
-    print({
+    # Show configuration
+    config = {
         "dataset_path": str(dataset_path),
         "num_examples": len(data),
         "model": args.model,
-    })
+        "evaluate": args.evaluate,
+    }
+    print("Configuration:")
+    for key, value in config.items():
+        print(f"  {key}: {value}")
 
-    if args.dry_run and not args.evaluate:
+    # Dry run mode
+    if args.dry_run:
         if data:
-            print("example_prompt:", data[0]["prompt"])
+            print(f"\nExample prompt:\n{data[0]['prompt'][:200]}...")
         return
 
+    # Create evaluation environment
     try:
-        import verifiers as vf
-        from openai import OpenAI
+        env = create_verifiers_env()
     except Exception as e:
-        print(f"Missing deps: {e}")
+        print(f"Error setting up environment: {e}")
         return
-
-    async def non_empty_completion(prompt, completion, answer, state):
-        content = (completion[-1].get("content", "") if completion else "").strip()
-        return 1.0 if content else 0.0
-
-    rubric = vf.Rubric(funcs=[non_empty_completion], weights=[1.0])
-    env = vf.SingleTurnEnv(dataset=data, rubric=rubric)
 
     if not args.evaluate:
-        print("Scaffold ready. Use --evaluate to run evaluation.")
-        print("Docs:", "https://verifiers.readthedocs.io/en/latest/overview.html")
+        print("\nScaffold ready. Use --evaluate to run evaluation.")
+        print("Docs: https://verifiers.readthedocs.io/en/latest/overview.html")
         return
 
-    client = OpenAI()
-
-    results = env.evaluate(
-        client,
-        model=args.model,
-        num_examples=args.num_examples,
-        rollouts_per_example=1,
-        max_concurrent=8,
-    )
-
-    rewards = getattr(results, "reward", None)
-    if rewards:
-        avg = sum(rewards) / len(rewards)
-        print({"examples": len(rewards), "avg_reward": avg})
-    else:
-        print("No rewards returned.")
+    # TODO: Replace with local model inference
+    print("\nEvaluation not implemented yet (OpenAI dependency removed)")
+    print("Next steps:")
+    print("1. Implement local model loading")
+    print("2. Add proper evaluation logic")
+    print("3. Integrate with Qwen2.5-Coder model")
 
 
 if __name__ == "__main__":
