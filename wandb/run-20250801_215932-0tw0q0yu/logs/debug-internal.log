@@ -1,0 +1,13 @@
+{"time":"2025-08-01T21:59:32.429617251+09:30","level":"INFO","msg":"stream: starting","core version":"0.21.0"}
+{"time":"2025-08-01T21:59:32.886433356+09:30","level":"INFO","msg":"stream: created new stream","id":"0tw0q0yu"}
+{"time":"2025-08-01T21:59:32.886451156+09:30","level":"INFO","msg":"stream: started","id":"0tw0q0yu"}
+{"time":"2025-08-01T21:59:32.886463157+09:30","level":"INFO","msg":"writer: Do: started","stream_id":"0tw0q0yu"}
+{"time":"2025-08-01T21:59:32.886519158+09:30","level":"INFO","msg":"sender: started","stream_id":"0tw0q0yu"}
+{"time":"2025-08-01T21:59:32.886541058+09:30","level":"INFO","msg":"handler: started","stream_id":"0tw0q0yu"}
+{"time":"2025-08-01T22:00:16.527827632+09:30","level":"INFO","msg":"handler: operation stats","stats":{"operations":[{"desc":"uploading artifact gsm8k_eval_results","runtime_seconds":1.005035203},{"desc":"uploading config.yaml","runtime_seconds":0.190896814,"progress":"2.2KB/2.2KB"}],"total_operations":2}}
+{"time":"2025-08-01T22:00:20.06617828+09:30","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-08-01T22:00:20.483191558+09:30","level":"INFO","msg":"stream: closing","id":"0tw0q0yu"}
+{"time":"2025-08-01T22:00:20.483218958+09:30","level":"INFO","msg":"handler: closed","stream_id":"0tw0q0yu"}
+{"time":"2025-08-01T22:00:20.483229559+09:30","level":"INFO","msg":"writer: Close: closed","stream_id":"0tw0q0yu"}
+{"time":"2025-08-01T22:00:20.483253359+09:30","level":"INFO","msg":"sender: closed","stream_id":"0tw0q0yu"}
+{"time":"2025-08-01T22:00:20.483371861+09:30","level":"INFO","msg":"stream: closed","id":"0tw0q0yu"}

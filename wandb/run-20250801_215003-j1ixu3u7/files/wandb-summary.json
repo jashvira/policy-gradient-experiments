@@ -1,0 +1,1 @@
+{"gsm8k_accuracy":0.04927975739196361,"eval_time_seconds":66.57224154472351,"_timestamp":1.7540508747206707e+09,"_wandb":{"runtime":70},"gsm8k_total":1319,"_step":0,"gsm8k_correct":65,"throughput_problems_per_sec":19.81306276301197,"_runtime":70}

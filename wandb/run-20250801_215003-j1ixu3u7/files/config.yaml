@@ -1,0 +1,72 @@
+_wandb:
+    value:
+        cli_version: 0.21.0
+        e:
+            x5fle3waqz4q5c0gxm77yc2miajo1ede:
+                args:
+                    - --model
+                    - /home/jash404/RL_experiments/gsm8k/outputs/Qwen-0.5B-GRPO-run2/checkpoint-700
+                    - --batch_size
+                    - "512"
+                    - --no-vllm
+                codePath: gsm8k/eval_gsm8k.py
+                codePathLocal: eval_gsm8k.py
+                cpu_count: 8
+                cpu_count_logical: 8
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "269427478528"
+                        used: "207144099840"
+                email: jashvira2001404@gmail.com
+                executable: /home/jash404/RL_experiments/.venv/bin/python
+                gpu: NVIDIA GeForce RTX 4060 Ti
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      memoryTotal: "17175674880"
+                      name: NVIDIA GeForce RTX 4060 Ti
+                      uuid: GPU-500eb3c2-4bed-a25a-7ddc-0764339fc499
+                host: ADL-DSK-106
+                memory:
+                    total: "16737595392"
+                os: Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.31
+                program: /home/jash404/RL_experiments/gsm8k/eval_gsm8k.py
+                python: CPython 3.11.12
+                root: /home/jash404/RL_experiments/gsm8k
+                startedAt: "2025-08-01T12:20:03.205578Z"
+                writerId: x5fle3waqz4q5c0gxm77yc2miajo1ede
+        m: []
+        python_version: 3.11.12
+        t:
+            "1":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 71
+                - 95
+            "2":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 71
+                - 95
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.11.12
+            "5": 0.21.0
+            "6": 4.53.3
+            "12": 0.21.0
+            "13": linux-x86_64
+batch_size:
+    value: 512
+model:
+    value: /home/jash404/RL_experiments/gsm8k/outputs/Qwen-0.5B-GRPO-run2/checkpoint-700
+model_name:
+    value: checkpoint-700

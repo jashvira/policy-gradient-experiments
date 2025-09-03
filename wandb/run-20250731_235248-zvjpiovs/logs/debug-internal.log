@@ -1,0 +1,6 @@
+{"time":"2025-07-31T23:52:48.914230365+09:30","level":"INFO","msg":"stream: starting","core version":"0.21.0"}
+{"time":"2025-07-31T23:52:49.441861645+09:30","level":"INFO","msg":"stream: created new stream","id":"zvjpiovs"}
+{"time":"2025-07-31T23:52:49.442009659+09:30","level":"INFO","msg":"stream: started","id":"zvjpiovs"}
+{"time":"2025-07-31T23:52:49.442100068+09:30","level":"INFO","msg":"writer: Do: started","stream_id":"zvjpiovs"}
+{"time":"2025-07-31T23:52:49.442151072+09:30","level":"INFO","msg":"handler: started","stream_id":"zvjpiovs"}
+{"time":"2025-07-31T23:52:49.442190776+09:30","level":"INFO","msg":"sender: started","stream_id":"zvjpiovs"}

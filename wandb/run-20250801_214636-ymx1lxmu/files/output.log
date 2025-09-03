@@ -1,0 +1,13 @@
+Loading GSM8K test dataset...
+Preprocessing dataset...
+==================================================
+Running inference on 1319 examples...
+Generating 1319 responses with vLLM...
+Adding requests: 100%|████████████████████████████████████████████████| 1319/1319 [00:00<00:00, 1637.88it/s]
+Processed prompts: 100%|█| 1319/1319 [00:06<00:00, 217.25it/s, est. speed input: 20924.48 toks/s, output: 50
+Evaluation completed in 7.09s
+Accuracy: 0.0531 (70/1319)
+==================================================
+Saving results to: evaluations/20250801_214648_checkpoint-700_b512
+Detailed results saved to: evaluations/20250801_214648_checkpoint-700_b512/results.csv
+Summary saved to: evaluations/20250801_214648_checkpoint-700_b512/summary.txt
