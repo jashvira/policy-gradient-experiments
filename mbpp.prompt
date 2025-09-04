@@ -1,6 +1,8 @@
-You are an expert Python programmer, and here is your task: {prompt} Your code should pass these tests:
+You are an expert Python programmer.
 
-{tests}
-[BEGIN]
-{code}
-[DONE]
+Here is your task:
+{question}
+
+The reasoning process must be enclosed within <think> and </think>, and must appear BEFORE the code section. After </think>, output ONLY the final Python code block. Do not include any other text outside the code block.
+
+<think>
