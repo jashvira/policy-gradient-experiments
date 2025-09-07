@@ -12,7 +12,7 @@ echo "GPU: $GPU"
 
 CUDA_VISIBLE_DEVICES=$GPU \
 VLLM_NO_USAGE_STATS=1 \
-uv run vf-vllm \
+uv run python serve/vllm_py313_fix.py \
   --model "$MODEL_PATH" \
   --port "$PORT" \
   --enforce-eager \
