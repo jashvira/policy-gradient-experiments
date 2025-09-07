@@ -1,8 +1,0 @@
-You are an expert Python programmer.
-
-Here is your task:
-{question}
-
-The reasoning process must be enclosed within <think> and </think>, and must appear BEFORE the code section. After </think>, output ONLY the final Python code block. Do not include any other text outside the code block.
-
-<think>

@@ -35,6 +35,7 @@ logs/
 eval_runs/
 evaluation_results/
 model_checkpoints/
+outputs/
 
 # Local model and dataset caches
 .models/

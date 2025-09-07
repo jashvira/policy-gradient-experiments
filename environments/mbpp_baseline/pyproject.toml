@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mbpp_baseline"
+version = "0.0.1"
+requires-python = ">=3.11"
+dependencies = ["verifiers", "datasets"]
+
+[tool.hatch.build]
+include = ["mbpp_baseline.py"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
