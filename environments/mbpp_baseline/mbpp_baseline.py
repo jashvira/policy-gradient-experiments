@@ -10,6 +10,7 @@ from pathlib import Path
 from datasets import Dataset
 import verifiers as vf
 from .util.sandbox import run_code
+from .util.cleanup import clean_code_main_block
 
 
 def _get_project_root() -> Path:
@@ -78,6 +79,7 @@ def _build_rubric(parser: vf.Parser) -> vf.Rubric:
         if not code.strip():
             return 0.0
 
+        code = clean_code_main_block(code)
         result = run_code(code)
         if result.get("status") == "Success":
             run_result = result.get("run_result", {})
