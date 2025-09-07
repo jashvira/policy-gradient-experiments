@@ -4,15 +4,25 @@ Minimal programmatic MBPP evaluation that delegates to Verifiers' built-in evalu
 (equivalent to `vf-eval -s`). Always saves dataset-formatted outputs for vf-tui.
 
 Usage:
+  # Local vLLM
   uv run python runs/programmatic_eval.py \
     --base-url http://localhost:8000/v1 \
     --model .models/Qwen2.5-Coder-1.5B \
     --dataset valid \
     --num-examples 5 \
     --rollouts 1
+
+  # OpenAI (API key read from .env -> OPENAI_API_KEY)
+  OPENAI_API_KEY=sk-... uv run python runs/programmatic_eval.py \
+    --base-url https://api.openai.com/v1 \
+    --model gpt-4o-mini \
+    --dataset valid \
+    --num-examples 5 \
+    --rollouts 1
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -28,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-examples", type=int, default=5)
     p.add_argument("--rollouts", type=int, default=1)
     p.add_argument("--max-concurrent", "-c", type=int, default=32, help="Maximum number of concurrent requests")
+    # API key is read from environment by default: OPENAI_API_KEY or VLLM_API_KEY (unused)
+    p.add_argument("--api-key-var", default=None, help="Env var name for API key; default reads OPENAI_API_KEY")
     return p.parse_args()
 
 
@@ -50,13 +62,16 @@ def main() -> None:
         adjusted_num = dataset_size
         print(f"Capping num-examples to dataset size: {dataset_size}")
 
+    # Resolve API key var from .env-loaded environment (uv respects .env automatically)
+    api_key_var = args.api_key_var or ("OPENAI_API_KEY" if os.getenv("OPENAI_API_KEY") else "EMPTY")
+
     vf_eval_environment(
         env="mbpp_baseline",
         env_args={"dataset_split": args.dataset},
         env_dir_path=str(envs_dir),
         endpoints_path=str(project_root / "configs" / "endpoints.py"),
         model=args.model,
-        api_key_var="EMPTY",
+        api_key_var=api_key_var,
         api_base_url=args.base_url,
         num_examples=adjusted_num,
         rollouts_per_example=args.rollouts,
