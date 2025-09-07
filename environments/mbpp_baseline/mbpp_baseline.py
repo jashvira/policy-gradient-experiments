@@ -1,23 +1,25 @@
-"""MBPP baseline environment (single-file module) for Verifiers.
+"""MBPP baseline environment for Verifiers.
 
-This file exposes `load_environment(...)` and follows the minimal pattern
-recommended by the Verifiers docs. It can be installed via
-`vf-install environments/mbpp_baseline`.
+A clean evaluation environment for the MBPP (Mostly Basic Python Programs) dataset
+that uses SandboxFusion for remote code execution and reward calculation.
 """
 
 import json
 from pathlib import Path
 from datasets import Dataset
 import verifiers as vf
-from .util.sandbox import run_code
-from .util.cleanup import clean_code_main_block
+from mbpp_baseline.util.mbpp_utils import calculate_compile_reward, calculate_tests_reward
 
 
 def _get_project_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
-def _load_dataset(dataset_split: str = "valid", data_dir: Path | None = None) -> Dataset:
+def _load_dataset(
+    dataset_split: str = "valid",
+    data_dir: Path | None = None,
+    include_tests_in_prompt: bool = True,
+) -> Dataset:
     if data_dir is None:
         data_dir = _get_project_root() / "datasets" / "mbpp"
 
@@ -41,55 +43,39 @@ def _load_dataset(dataset_split: str = "valid", data_dir: Path | None = None) ->
                 continue
             rec = json.loads(line)
             text = rec.get("text") or rec.get("prompt") or "Solve the task."
-            rows.append({"question": text, "info": {}})
+            if include_tests_in_prompt:
+                tests = rec.get("test_list") or []
+                # Keep concise and deterministic; avoid challenge tests by default
+                if tests:
+                    formatted_tests = "\n".join(str(t).strip() for t in tests if str(t).strip())
+                    text = (
+                        f"{text}\n\nYour code should pass these tests:\n\n{formatted_tests}\n"
+                    )
+            rows.append({
+                "question": text,
+                "info": {
+                    "test_list": rec.get("test_list", []),
+                    "test_setup_code": rec.get("test_setup_code", ""),
+                }
+            })
     return Dataset.from_list(rows)
 
 
-def _build_parser() -> vf.ThinkParser:
-    """Parser that extracts the final code after </think> and from ``` blocks.
-
-    Provides a stronger signal to the rubric by isolating the code the model
-    intends to submit, rather than the entire completion.
-    """
-    import re
-
-    def extract_final_code(text: str) -> str:
-        # Take content after </think> if present
-        if "</think>" in text:
-            text = text.split("</think>", 1)[1]
-        # Drop any accidental role prefixes
-        text = re.sub(r"^\s*assistant\s*:\s*", "", text, flags=re.IGNORECASE)
-        # Require a fenced python block; handle extra backticks and optional newlines
-        m = re.search(r"```+(?:python)?\s*\n?([\s\S]*?)```+", text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-        return ""
-
-    return vf.ThinkParser(extract_fn=extract_final_code)
 
 
 def _build_rubric(parser: vf.Parser) -> vf.Rubric:
-    """Minimal rubric backed by SandboxFusion remote execution.
+    """Rubric with compile and test rewards."""
 
-    Returns 1.0 if code runs successfully in the sandbox (return_code==0), else 0.0.
-    """
+    def compile_reward(parser, completion, answer, **kwargs):
+        return calculate_compile_reward(completion)
 
-    def remote_run_reward(_parser, completion, _answer, **_):
-        code = parser.parse_answer(completion) or ""
-        if not code.strip():
-            return 0.0
-
-        code = clean_code_main_block(code)
-        result = run_code(code)
-        if result.get("status") == "Success":
-            run_result = result.get("run_result", {})
-            return 1.0 if run_result.get("return_code") == 0 else 0.0
-
-        return 0.0
+    def tests_reward(parser, completion, answer, **kwargs):
+        info = kwargs.get("info", {})
+        return calculate_tests_reward(completion, info)
 
     return vf.Rubric(
-        funcs=[remote_run_reward],
-        weights=[1.0],
+        funcs=[compile_reward, tests_reward],
+        weights=[0.2, 0.8],
         parser=parser,
     )
 
@@ -112,6 +98,7 @@ def load_environment(
     num_examples: int | None = None,
     data_dir: Path | None = None,
     prompt_file: Path | None = None,
+    include_tests_in_prompt: bool = True,
     **kwargs,
 ) -> vf.Environment:
     # Prefer inline default prompt; allow optional override via file for flexibility
@@ -120,7 +107,7 @@ def load_environment(
     else:
         system_prompt = DEFAULT_SYSTEM_PROMPT
 
-    dataset = _load_dataset(dataset_split, data_dir)
+    dataset = _load_dataset(dataset_split, data_dir, include_tests_in_prompt)
     if num_examples is not None and num_examples > 0:
         cap = min(num_examples, len(dataset))
         dataset = dataset.select(range(cap))
@@ -128,11 +115,11 @@ def load_environment(
     eval_dataset = None
     if eval_split is not None:
         try:
-            eval_dataset = _load_dataset(eval_split, data_dir)
+            eval_dataset = _load_dataset(eval_split, data_dir, include_tests_in_prompt)
         except Exception:
             eval_dataset = None
 
-    parser = _build_parser()
+    parser = None
     rubric = _build_rubric(parser)
 
     return vf.SingleTurnEnv(

@@ -29,6 +29,10 @@ def run_code(code: str, language: str = "python", timeout: int = 8) -> dict:
         )
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.ConnectionError as e:
+        logger.warning(f"SandboxFusion server not reachable at {SANDBOX_URL}")
+        logger.warning("   Start it with: sudo docker run -d -p 8080:8080 volcengine/sandbox-fusion:server-20250609")
+        return {"status": "Error", "error": f"Sandbox server not running: {e}"}
     except requests.exceptions.RequestException as e:
         logger.error(f"SandboxFusion connection error: {e}")
         return {"status": "Error", "error": str(e)}
