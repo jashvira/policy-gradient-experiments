@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from datasets import Dataset
 import verifiers as vf
+from .util.sandbox import run_code
 
 
 def _get_project_root() -> Path:
@@ -44,37 +45,62 @@ def _load_dataset(dataset_split: str = "valid", data_dir: Path | None = None) ->
 
 
 def _build_parser() -> vf.ThinkParser:
-    return vf.ThinkParser(extract_fn=lambda x: x)
+    """Parser that extracts the final code after </think> and from ``` blocks.
+
+    Provides a stronger signal to the rubric by isolating the code the model
+    intends to submit, rather than the entire completion.
+    """
+    import re
+
+    def extract_final_code(text: str) -> str:
+        # Take content after </think> if present
+        if "</think>" in text:
+            text = text.split("</think>", 1)[1]
+        # Drop any accidental role prefixes
+        text = re.sub(r"^\s*assistant\s*:\s*", "", text, flags=re.IGNORECASE)
+        # Require a fenced python block; handle extra backticks and optional newlines
+        m = re.search(r"```+(?:python)?\s*\n?([\s\S]*?)```+", text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        return ""
+
+    return vf.ThinkParser(extract_fn=extract_final_code)
 
 
 def _build_rubric(parser: vf.Parser) -> vf.Rubric:
-    def code_correctness(parser, completion, answer, **kwargs):
+    """Minimal rubric backed by SandboxFusion remote execution.
+
+    Returns 1.0 if code runs successfully in the sandbox (return_code==0), else 0.0.
+    """
+
+    def remote_run_reward(_parser, completion, _answer, **_):
         code = parser.parse_answer(completion) or ""
         if not code.strip():
             return 0.0
-        try:
-            compile(code, "<string>", "exec")
-            return 1.0
-        except SyntaxError:
-            return 0.0
 
-    def has_code_block(parser, completion, **kwargs):
-        code = parser.parse_answer(completion) or ""
-        return 1.0 if code and code.strip() else 0.0
+        result = run_code(code)
+        if result.get("status") == "Success":
+            run_result = result.get("run_result", {})
+            return 1.0 if run_result.get("return_code") == 0 else 0.0
+
+        return 0.0
 
     return vf.Rubric(
-        funcs=[code_correctness, has_code_block, parser.get_format_reward_func()],
-        weights=[1.0, 0.3, 0.2],
+        funcs=[remote_run_reward],
+        weights=[1.0],
         parser=parser,
     )
 
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are an expert Python programmer.\n\n"
-    "Here is your task:\n{question}\n\n"
-    "The reasoning process must be enclosed within <think> and </think>, and must appear BEFORE the code section. "
-    "After </think>, output ONLY the final Python code block. Do not include any other text outside the code block.\n\n"
-    "<think>"
+    "You are an expert Python programmer.\n"
+    "Think step-by-step inside <think>...</think>.\n"
+    "Then output ONLY a single fenced Python code block with the final solution.\n"
+    "Format strictly as:\n"
+    "```python\n"
+    "# your function implementation\n"
+    "```\n"
+    "No prose or extra text outside the code block.\n"
 )
 
 
