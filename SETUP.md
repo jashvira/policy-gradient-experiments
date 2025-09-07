@@ -30,10 +30,19 @@ cd policy-gradient-experiments
 uv sync
 
 # Install PyTorch and Flash Attention with precompiled wheels
-# NOTE: These are excluded from pyproject.toml to use specific precompiled versions
+# NOTE: These are excluded from pyproject.toml to use specific precompiled versions. MAKE SURE TO FOLLOW this torch->flash-attn ordering.
 source ~/.local/bin/env
 uv pip install torch==2.7.1
-uv pip install --no-build-isolation flash-attn==2.8.0.post2
+
+# Install Flash Attention (requires CUDA development toolkit)
+if command -v nvcc &> /dev/null; then
+    echo "CUDA toolkit found, installing Flash Attention..."
+    uv pip install --no-build-isolation flash-attn==2.8.0.post2
+else
+    echo "Warning: CUDA toolkit (nvcc) not found. Installing CUDA toolkit first..."
+    sudo apt update && sudo apt install -y cuda-toolkit-12-2
+    uv pip install --no-build-isolation flash-attn==2.8.0.post2
+fi
 ```
 
 **Why this approach works:**

@@ -38,8 +38,6 @@ model_checkpoints/
 
 # Local model and dataset caches
 .models/
-datasets/**
-!datasets/mbpp/**
 
 # Coverage reports
 *.coverage

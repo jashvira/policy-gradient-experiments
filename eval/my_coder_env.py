@@ -5,9 +5,17 @@ from train.main import resolve_dataset_path, load_mbpp
 from datasets import Dataset
 
 
-def build_dataset(dataset_split: str = "valid", data_dir: Path | str = Path("/home/jash404/RL_experiments/datasets/mbpp")) -> Dataset:
+def _get_project_root() -> Path:
+    """Get the project root directory."""
+    return Path(__file__).parent.parent
+
+
+def build_dataset(dataset_split: str = "valid", data_dir: Path | str | None = None) -> Dataset:
     """Return HF Dataset with columns: question (str), info (dict)."""
-    data_dir = Path(data_dir)
+    if data_dir is None:
+        data_dir = _get_project_root() / "datasets" / "mbpp"
+    else:
+        data_dir = Path(data_dir)
     dataset_path = resolve_dataset_path(dataset_split, data_dir)
     raw = load_mbpp(dataset_path)
     rows = [{"question": item.get("prompt", ""), "info": {}} for item in raw]
@@ -46,10 +54,22 @@ def build_rubric(parser: vf.Parser) -> vf.Rubric:
 def load_environment(**kwargs):
     """Load and configure the coding environment."""
     split = kwargs.pop("dataset_split", "valid")
-    data_dir = kwargs.pop("data_dir", Path("/home/jash404/RL_experiments/datasets/mbpp"))
+    data_dir = kwargs.pop("data_dir", None)
+    prompt_file = kwargs.pop("prompt_file", None)
 
-    # Load system prompt from mbpp.prompt
-    prompt_file = Path("/home/jash404/RL_experiments/mbpp.prompt")
+    # Set defaults relative to project root
+    project_root = _get_project_root()
+    if data_dir is None:
+        data_dir = project_root / "datasets" / "mbpp"
+    else:
+        data_dir = Path(data_dir)
+
+    if prompt_file is None:
+        prompt_file = project_root / "mbpp.prompt"
+    else:
+        prompt_file = Path(prompt_file)
+
+    # Load system prompt
     system_prompt = prompt_file.read_text().strip()
 
     dataset = build_dataset(split, data_dir)

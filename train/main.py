@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 
+def _get_project_root() -> Path:
+    """Get the project root directory."""
+    return Path(__file__).parent.parent
+
+
 # ============================================================================
 # Configuration & Argument Parsing
 # ============================================================================
@@ -23,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("/home/jash404/RL_experiments/datasets/mbpp"),
-        help="MBPP data directory"
+        default=None,
+        help="MBPP data directory (default: datasets/mbpp relative to project root)"
     )
     parser.add_argument(
         "--num-examples",
@@ -113,6 +118,10 @@ def create_verifiers_env():
 def main() -> None:
     """Main evaluation logic."""
     args = parse_args()
+
+    # Set default data directory if not provided
+    if args.data_dir is None:
+        args.data_dir = _get_project_root() / "datasets" / "mbpp"
 
     # Load dataset (for display purposes only - env handles its own dataset)
     try:

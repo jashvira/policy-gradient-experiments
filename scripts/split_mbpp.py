@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Iterable, Dict, Any, List
 
 
-DATA_DIR = Path("datasets/mbpp")
+def _get_project_root() -> Path:
+    """Get the project root directory."""
+    return Path(__file__).parent.parent
+
+
+DATA_DIR = _get_project_root() / "datasets" / "mbpp"
 SANITIZED_JSON = DATA_DIR / "sanitized-mbpp.json"
 RAW_JSONL = DATA_DIR / "mbpp.jsonl"
 

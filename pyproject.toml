@@ -1,0 +1,132 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "policy-gradient-experiments"
+version = "0.1.0"
+description = "Policy gradient experiments for code generation using Qwen2.5-Coder"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Policy Gradient Research", email = "research@example.com"},
+]
+keywords = ["reinforcement-learning", "policy-gradient", "code-generation", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Code Generators",
+]
+
+# Core dependencies that work with the setup script
+dependencies = [
+    # Core ML frameworks (install separately per SETUP.md)
+    # "torch>=2.6",  # Install manually: uv pip install torch==2.7.1
+    # "flash-attn==2.8.0.post2",  # Install manually (optional)
+
+    # Data and ML libraries
+    "datasets>=4.0.0",
+    "evaluate>=0.4.5",
+    "transformers>=4.51.0",
+    "accelerate",
+
+    # RL and training frameworks
+    "trl<0.20",
+    "peft<0.16",
+
+    # Inference and serving
+    "vllm>=0.10.0",
+
+    # Evaluation framework
+    "verifiers",
+
+    # Math and symbolic computation
+    "sympy",
+    "latex2sympy2-extended",
+    "math-verify",
+    "pylatexenc",
+
+    # Data and visualization
+    "matplotlib>=3.10.3",
+    "pandas",
+    "numpy",
+
+    # Utilities
+    "PyYAML>=6.0.2",
+    "huggingface-hub>=0.23",
+    "wandb>=0.21.0",
+    "tqdm",
+    "requests",
+
+    # OpenAI compatibility (for evaluation)
+    "openai",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/policy-gradient-experiments"
+Repository = "https://github.com/your-org/policy-gradient-experiments"
+Issues = "https://github.com/your-org/policy-gradient-experiments/issues"
+
+[project.scripts]
+train-mbpp = "train.main:main"
+eval-performance = "eval_performance:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["train*", "eval*", "scripts*"]
+exclude = [".venv*", "build*", "dist*", "*.egg-info*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+  | \.models
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true

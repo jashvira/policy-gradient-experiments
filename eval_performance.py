@@ -16,13 +16,18 @@ from openai import OpenAI
 from eval.my_coder_env import load_environment
 
 
+def _get_project_root() -> Path:
+    """Get the project root directory."""
+    return Path(__file__).parent
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate model performance on MBPP")
     parser.add_argument("--model", default="Qwen2.5-Coder-1.5B", help="Model name")
     parser.add_argument("--base-url", default="http://localhost:8000/v1", help="API base URL")
     parser.add_argument("--api-key", default="EMPTY", help="API key")
     parser.add_argument("--dataset", default="valid", help="Dataset split: train|valid|test|full")
-    parser.add_argument("--data-dir", type=Path, default=Path("datasets/mbpp"), help="Dataset directory")
+    parser.add_argument("--data-dir", type=Path, default=None, help="Dataset directory (default: datasets/mbpp relative to project root)")
     parser.add_argument("--num-examples", type=int, default=20, help="Number of examples to evaluate")
     parser.add_argument("--rollouts", type=int, default=1, help="Rollouts per example")
     parser.add_argument("--max-concurrent", type=int, default=8, help="Max concurrent requests")
@@ -32,10 +37,15 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Set default data directory if not provided
+    if args.data_dir is None:
+        args.data_dir = _get_project_root() / "datasets" / "mbpp"
+
     print(f"=== MBPP Performance Evaluation ===")
     print(f"Model: {args.model}")
     print(f"Dataset: {args.dataset} ({args.num_examples} examples)")
     print(f"Server: {args.base_url}")
+    print(f"Data directory: {args.data_dir}")
     print()
 
     # Load environment and client
