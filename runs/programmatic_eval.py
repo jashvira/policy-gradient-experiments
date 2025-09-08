@@ -35,9 +35,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-url", required=True, help="OpenAI-compatible base URL (e.g., http://localhost:8000/v1)")
     p.add_argument("--model", required=True, help="Model name or local identifier")
     p.add_argument("--dataset", default="valid", help="Dataset split: train|valid|test|full")
-    p.add_argument("--num-examples", type=int, default=5)
+    p.add_argument("--num-examples", type=int, default=1000)
     p.add_argument("--rollouts", type=int, default=1)
-    p.add_argument("--max-concurrent", "-c", type=int, default=32, help="Maximum number of concurrent requests")
+    p.add_argument("--max-concurrent", "-c", type=int, default=64, help="Maximum number of concurrent requests")
     # API key is read from environment by default: OPENAI_API_KEY or VLLM_API_KEY (unused)
     p.add_argument("--api-key-var", default=None, help="Env var name for API key; default reads OPENAI_API_KEY")
     return p.parse_args()
@@ -67,7 +67,7 @@ def main() -> None:
 
     vf_eval_environment(
         env="mbpp_baseline",
-        env_args={"dataset_split": args.dataset},
+        env_args={"dataset_split": args.dataset, "eval_split": args.dataset},
         env_dir_path=str(envs_dir),
         endpoints_path=str(project_root / "configs" / "endpoints.py"),
         model=args.model,

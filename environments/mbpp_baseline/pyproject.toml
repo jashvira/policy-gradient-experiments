@@ -7,9 +7,12 @@ name = "mbpp_baseline"
 version = "0.0.1"
 requires-python = ">=3.11"
 dependencies = ["verifiers", "datasets", "requests"]
+description = "MBPP baseline environment for Verifiers (compile + tests via SandboxFusion)."
+readme = "README.md"
+keywords = ["verifiers", "environment", "mbpp", "code-generation", "python", "sandbox"]
 
 [tool.hatch.build]
-include = ["mbpp_baseline.py", "util/*.py", "__init__.py"]
+include = ["mbpp_baseline.py", "util/*.py", "__init__.py", "README.md"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
