@@ -78,7 +78,7 @@ def _build_rubric(parser: vf.Parser) -> vf.Rubric:
 
     return vf.Rubric(
         funcs=[compile_reward, tests_reward, format_reward],
-        weights=[0.2, 0.6, 0.2],
+        weights=[0.2, 0.7, 0.1],
         parser=parser,
     )
 

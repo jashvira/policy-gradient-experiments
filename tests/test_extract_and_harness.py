@@ -1,4 +1,7 @@
-from environments.mbpp_baseline.util.mbpp_utils import extract_code_from_completion, build_test_harness
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'environments'))
+from mbpp_baseline.util.mbpp_utils import extract_code_from_completion, build_fractional_test_harness
 
 
 def test_extract_code_from_gnarly_completion():
@@ -24,11 +27,13 @@ def min_sum_of_factors(n: int) -> int:
     assert "import math" in code
 
 
-def test_build_test_harness_with_real_mbpp():
+def test_build_fractional_test_harness_with_real_mbpp():
     sol = "def find_Min_Sum(num):\n    sum = 0\n    return sum"
     tests = ["assert find_Min_Sum(12) == 7", "assert find_Min_Sum(2) == 2"]
-    script = build_test_harness(sol, tests=tests)
+    script = build_fractional_test_harness(sol, tests=tests)
     assert "def find_Min_Sum" in script
     assert "assert find_Min_Sum(12) == 7" in script
+    assert "RESULT_JSON:" in script
+    assert "json.dumps" in script
 
 
