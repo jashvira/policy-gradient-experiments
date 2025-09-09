@@ -1,6 +1,6 @@
 # GRPO Training Configuration
 model:
-  name: ".models/Qwen2.5-Coder-7B"
+  name: ".models/Qwen2.5-Coder-3B"
   env_id: "mbpp_baseline"
 
 # Training hyperparameters
@@ -16,11 +16,11 @@ training:
 batch:
   per_device_train_batch_size: 8
   num_generations: 16
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 8
 
 # Sequence and generation lengths
 generation:
-  max_seq_len: 4096
+  max_seq_len: 2048
   max_tokens: 1024
   temperature: 1.0
   top_p: 1.0

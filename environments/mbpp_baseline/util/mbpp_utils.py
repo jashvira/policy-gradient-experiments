@@ -144,3 +144,16 @@ def calculate_tests_reward(completion: Any, info: dict[str, Any]) -> float:
         run_result = result.get("run_result", {})
         return 1.0 if run_result.get("return_code") == 0 else 0.0
     return 0.0
+
+
+def calculate_format_reward(completion: Any) -> float:
+    """Return 1.0 if completion contains a fenced Python code block, else 0.0.
+
+    Format-only: no execution and no syntax parsing; purely checks for
+    ```python\n...\n``` anywhere in the text.
+    """
+    text = extract_text_from_completion(completion).strip()
+
+    # Reward if any python fenced block exists (not necessarily the only content)
+    pattern = re.compile(r"```python\s*\n[\s\S]+?\n```", re.IGNORECASE)
+    return 1.0 if pattern.search(text) else 0.0

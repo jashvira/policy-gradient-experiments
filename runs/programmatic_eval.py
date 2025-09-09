@@ -7,7 +7,7 @@ Usage:
   # Local vLLM
   uv run python runs/programmatic_eval.py \
     --base-url http://localhost:8000/v1 \
-    --model .models/Qwen2.5-Coder-7B \
+    --model .models/Qwen2.5-Coder-3B \
     --dataset valid \
     --num-examples 5 \
     --rollouts 1

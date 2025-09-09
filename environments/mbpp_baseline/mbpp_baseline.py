@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from datasets import Dataset
 import verifiers as vf
-from mbpp_baseline.util.mbpp_utils import calculate_compile_reward, calculate_tests_reward
+from mbpp_baseline.util.mbpp_utils import calculate_compile_reward, calculate_tests_reward, calculate_format_reward
 
 
 def _get_project_root() -> Path:
@@ -64,7 +64,7 @@ def _load_dataset(
 
 
 def _build_rubric(parser: vf.Parser) -> vf.Rubric:
-    """Rubric with compile and test rewards."""
+    """Rubric with compile, test, and format rewards."""
 
     def compile_reward(parser, completion, answer, **kwargs):
         return calculate_compile_reward(completion)
@@ -73,9 +73,12 @@ def _build_rubric(parser: vf.Parser) -> vf.Rubric:
         info = kwargs.get("info", {})
         return calculate_tests_reward(completion, info)
 
+    def format_reward(parser, completion, answer, **kwargs):
+        return calculate_format_reward(completion)
+
     return vf.Rubric(
-        funcs=[compile_reward, tests_reward],
-        weights=[0.4, 0.6],
+        funcs=[compile_reward, tests_reward, format_reward],
+        weights=[0.2, 0.6, 0.2],
         parser=parser,
     )
 
