@@ -7,9 +7,9 @@ model:
 training:
   max_steps: 200
   learning_rate: 1.0e-6
-  lr_scheduler_type: "constant_with_warmup"
+  lr_scheduler_type: "cosine"
   warmup_steps: 10
-  max_grad_norm: 0.005
+  max_grad_norm: 0.001
   num_iterations: 1
 
 # Batch configuration
