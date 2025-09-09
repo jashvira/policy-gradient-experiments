@@ -9,18 +9,23 @@ if ! command -v uv &> /dev/null; then
   source $HOME/.local/bin/env || true
 fi
 
-# 2. Sync dependencies
+# 2. Configure Git
+echo "Configuring Git..."
+git config --global user.name "jashvira"
+git config --global user.email "jashvira2001404@gmail.com"
+
+# 3. Sync dependencies
 echo "Syncing dependencies with uv..."
 uv sync
 
-# 3. Install PyTorch and Flash Attention
+# 4. Install PyTorch and Flash Attention
 echo "Installing PyTorch 2.7.1..."
 uv pip install torch==2.7.1
 
 echo "Installing Flash Attention 2.8.0.post2..."
 uv pip install --no-build-isolation flash-attn==2.8.0.post2
 
-# 4. Download model
+# 5. Download model
 MODEL_DIR=".models/Qwen2.5-Coder-7B"
 if [ ! -d "$MODEL_DIR" ]; then
   echo "Downloading Qwen2.5-Coder-7B model..."
@@ -44,7 +49,7 @@ else
   echo "Model already downloaded at $MODEL_DIR"
 fi
 
-# 5. Verify installations
+# 6. Verify installations
 echo "Verifying Flash Attention installation..."
 uv run python -c "import flash_attn; print(f'Flash Attention: {flash_attn.__version__}')"
 

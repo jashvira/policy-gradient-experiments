@@ -24,7 +24,14 @@ git clone <repo-url> policy-gradient-experiments
 cd policy-gradient-experiments
 ```
 
-## 3. Install Dependencies
+## 3. Configure Git (Optional)
+```bash
+# Set your Git username and email for commits
+git config --global user.name "jashvira"
+git config --global user.email "jashvira2001404@gmail.com"
+```
+
+## 4. Install Dependencies
 ```bash
 # Install base dependencies (excluding torch/flash-attn)
 uv sync
@@ -51,7 +58,7 @@ fi
 - **Dependency order**: Installing torch first provides build dependencies for flash-attn
 - **Build isolation**: `--no-build-isolation` allows flash-attn to use the pre-installed torch
 
-## 4. Download Model
+## 5. Download Model
 ```bash
 mkdir -p .models
 uv run python -c "
@@ -74,7 +81,7 @@ print(f'Model saved to {save_path}')
 "
 ```
 
-## 5. Verify Setup
+## 6. Verify Setup
 ```bash
 # Test Flash Attention installation
 source ~/.local/bin/env
