@@ -28,7 +28,7 @@ generation:
 
 # GRPO-specific parameters
 grpo:
-  beta: 0.001
+  beta: 0.1
   sync_ref_model: true
   ref_model_sync_steps: 100
   ref_model_mixup_alpha: 0.5
