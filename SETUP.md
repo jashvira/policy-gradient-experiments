@@ -101,8 +101,26 @@ print(f'Model on {device}, Flash Attention: {getattr(model.config, \"_attn_imple
 # Expected output: Model on cuda:0, Flash Attention: flash_attention_2
 ```
 
+## 7. Start SandboxFusion (Required for Code Execution)
 
-## 7. Development Tools (Recommended)
+SandboxFusion provides a secure environment for executing code during policy gradient training and evaluation:
+
+```bash
+# Start SandboxFusion Docker container on port 8080
+sudo docker run -d --rm --privileged -p 8080:8080 --name sandboxfusion volcengine/sandbox-fusion:server-20250609
+
+# Set environment variable
+export SANDBOX_URL=http://localhost:8080
+
+# Verify SandboxFusion is running (it takes a while to be downloaded so dont interrupt)
+curl -s -X POST "$SANDBOX_URL/run_code" \
+  -H 'Content-Type: application/json' \
+  -d '{"code":"print(\"SandboxFusion is working!\")","language":"python"}' | python -m json.tool
+```
+
+Expected output should show successful code execution with "SandboxFusion is working!" in the output.
+
+## 8. Development Tools (Recommended)
 
 ```bash
 # Install Cursor extensions
