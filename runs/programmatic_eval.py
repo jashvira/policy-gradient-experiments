@@ -78,7 +78,12 @@ def main() -> None:
         max_concurrent=args.max_concurrent,
         max_tokens=None,
         temperature=None,
-        sampling_args=None,
+        sampling_args={
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": None,
+            "n": 1,
+        },
         verbose=True,
         save_dataset=True,
         save_to_hf_hub=False,

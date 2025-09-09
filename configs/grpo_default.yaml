@@ -1,0 +1,62 @@
+# GRPO Training Configuration
+model:
+  name: ".models/Qwen2.5-Coder-7B"
+  env_id: "mbpp_baseline"
+
+# Training hyperparameters
+training:
+  max_steps: 200
+  learning_rate: 1.0e-6
+  lr_scheduler_type: "constant_with_warmup"
+  warmup_steps: 10
+  max_grad_norm: 0.01
+  num_iterations: 1
+
+# Batch configuration
+batch:
+  per_device_train_batch_size: 8
+  num_generations: 16
+  gradient_accumulation_steps: 4
+
+# Sequence and generation lengths
+generation:
+  max_seq_len: 4096
+  max_tokens: 1024
+  temperature: 1.0
+  top_p: 1.0
+  top_k: null
+
+# GRPO-specific parameters
+grpo:
+  beta: 0.001
+  sync_ref_model: true
+  ref_model_sync_steps: 100
+  ref_model_mixup_alpha: 0.5
+  loss_type: "dr_grpo"
+  epsilon: 0.2
+  delta: null
+
+# Async generation (vLLM)
+async_generation:
+  num_batches_ahead: 1
+  timeout: 300.0
+  max_concurrent: 1024
+
+# Evaluation and saving
+eval:
+  strategy: "steps"
+  steps: 10
+  per_device_batch_size: 256
+
+save:
+  strategy: "steps"
+  steps: 100
+
+# Logging
+logging:
+  steps: 1
+  log_completions: true
+  report_to: "wandb"
+  wandb_project: "mbpp"
+  wandb_entity: null
+  wandb_name: null
