@@ -58,8 +58,8 @@ uv run python -c "
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 
-model_name = 'Qwen/Qwen2.5-Coder-1.5B'
-save_path = '.models/Qwen2.5-Coder-1.5B'
+model_name = 'Qwen/Qwen2.5-Coder-7B'
+save_path = '.models/Qwen2.5-Coder-7B'
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 tokenizer.save_pretrained(save_path)
@@ -88,7 +88,7 @@ uv run python -c "import torch; print(f'PyTorch: {torch.__version__}')"
 # Test model loading with Flash Attention
 uv run python -c "
 from utils.model_utils import setup_model_and_tokenizer
-model, tokenizer, device = setup_model_and_tokenizer('.models/Qwen2.5-Coder-1.5B', 'cuda:0')
+model, tokenizer, device = setup_model_and_tokenizer('.models/Qwen2.5-Coder-7B', 'cuda:0')
 print(f'Model on {device}, Flash Attention: {getattr(model.config, \"_attn_implementation\", \"unknown\")}')
 "
 # Expected output: Model on cuda:0, Flash Attention: flash_attention_2

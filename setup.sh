@@ -21,14 +21,14 @@ echo "Installing Flash Attention 2.8.0.post2..."
 uv pip install --no-build-isolation flash-attn==2.8.0.post2
 
 # 4. Download model
-MODEL_DIR=".models/Qwen2.5-Coder-1.5B"
+MODEL_DIR=".models/Qwen2.5-Coder-7B"
 if [ ! -d "$MODEL_DIR" ]; then
-  echo "Downloading Qwen2.5-Coder-1.5B model..."
+  echo "Downloading Qwen2.5-Coder-7B model..."
   mkdir -p .models
   uv run python -c "
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
-model_name = 'Qwen/Qwen2.5-Coder-1.5B'
+model_name = 'Qwen/Qwen2.5-Coder-7B'
 save_path = '$MODEL_DIR'
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 tokenizer.save_pretrained(save_path)

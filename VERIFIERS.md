@@ -19,13 +19,13 @@ vf-install <env_name> -p environments
 - **Start model server (OpenAI‑compatible, e.g., vLLM)**
 ```bash
 CUDA_VISIBLE_DEVICES=0 VLLM_NO_USAGE_STATS=1 \
-uv run vf-vllm --model .models/Qwen2.5-Coder-1.5B \
+uv run vf-vllm --model .models/Qwen2.5-Coder-7B \
   --gpu-memory-utilization 0.95 --enforce-eager --disable-log-requests
 ```
 
 - **Quick eval + save (CLI)**
 ```bash
-vf-eval <env_name> -b http://localhost:8000/v1 -m .models/Qwen2.5-Coder-1.5B \
+vf-eval <env_name> -b http://localhost:8000/v1 -m .models/Qwen2.5-Coder-7B \
   -n 50 -r 2 -s
 ```
 
@@ -33,7 +33,7 @@ vf-eval <env_name> -b http://localhost:8000/v1 -m .models/Qwen2.5-Coder-1.5B \
 ```bash
 uv run python runs/programmatic_eval.py \
   --base-url http://localhost:8000/v1 \
-  --model .models/Qwen2.5-Coder-1.5B \
+  --model .models/Qwen2.5-Coder-7B \
   --dataset valid --num-examples 50 --rollouts 2 -c 64
 ```
 

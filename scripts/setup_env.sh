@@ -10,7 +10,7 @@
 #   bash scripts/setup_env.sh
 #   PYTHON_BIN=python3.11 VENV_DIR=.venv bash scripts/setup_env.sh --flash-attn
 #   TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121 bash scripts/setup_env.sh
-#   bash scripts/setup_env.sh --hf-token $HF_TOKEN --download-model Qwen/Qwen2.5-Coder-1.5B --dest /mnt/models/qwen
+#   bash scripts/setup_env.sh --hf-token $HF_TOKEN --download-model Qwen/Qwen2.5-Coder-7B --dest /mnt/models/qwen
 #   bash scripts/setup_env.sh --download-qwen
 
 set -Eeuo pipefail
@@ -38,8 +38,8 @@ CLEAR_VENV=0
 RUN_SMOKE=0
 
 # Convenience defaults for Qwen model used in this repo
-QWEN_MODEL_ID_DEFAULT="Qwen/Qwen2.5-Coder-1.5B"
-QWEN_DEST_DEFAULT="${REPO_ROOT}/.models/Qwen2.5-Coder-1.5B"
+QWEN_MODEL_ID_DEFAULT="Qwen/Qwen2.5-Coder-7B"
+QWEN_DEST_DEFAULT="${REPO_ROOT}/.models/Qwen2.5-Coder-7B"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

@@ -11,9 +11,9 @@ Minimal GRPO training script (aligned with Verifiers example), adapted for MBPP.
 
 Quickstart (examples):
 - Install env: uv run vf-install mbpp_baseline -p environments
-- Inference server (optional): CUDA_VISIBLE_DEVICES=0 uv run vf-vllm --model Qwen/Qwen2.5-Coder-1.5B
+- Inference server (optional): CUDA_VISIBLE_DEVICES=0 uv run vf-vllm --model Qwen/Qwen2.5-Coder-7B
 - Train (local HF accelerate): CUDA_VISIBLE_DEVICES=1 accelerate launch --num-processes 1 \
-    --config-file configs/zero3.yaml runs/minimal_train.py --model Qwen/Qwen2.5-Coder-1.5B
+    --config-file configs/zero3.yaml runs/minimal_train.py --model Qwen/Qwen2.5-Coder-7B
 
 Hyperparameter choices follow Verifiers training guide [training docs].
 """
@@ -26,7 +26,7 @@ sys.path.insert(0, str(ENVS_DIR))
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Minimal GRPO training for MBPP using Verifiers")
-    p.add_argument("--model", default=".models/Qwen2.5-Coder-1.5B", help="HF model id or local path")
+    p.add_argument("--model", default=".models/Qwen2.5-Coder-7B", help="HF model id or local path")
     p.add_argument("--env-id", default="mbpp_baseline", help="Verifiers environment id")
     p.add_argument("--max-steps", type=int, default=500)
     # Batch config per guide: 8 x 16 gens x 4 accum
