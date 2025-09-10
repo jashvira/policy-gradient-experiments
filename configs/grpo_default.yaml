@@ -40,7 +40,7 @@ grpo:
 async_generation:
   num_batches_ahead: 1
   timeout: 300.0
-  max_concurrent: 1024
+  max_concurrent: 2048
 
 # Evaluation and saving
 eval:
