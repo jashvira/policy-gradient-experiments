@@ -14,7 +14,8 @@ The rubric executes code via SandboxFusion:
 Run SandboxFusion locally:
 ```bash
 export SANDBOX_URL=http://localhost:8080
-sudo docker run -d -p 8080:8080 volcengine/sandbox-fusion:server-20250609
+sudo docker run -d --rm --privileged -p 8080:8080 \
+  --name sandboxfusion volcengine/sandbox-fusion:server-20250609
 ```
 If unreachable, a warning is logged.
 
@@ -28,7 +29,8 @@ You can pass `data_dir` via code or CLI flags supported by verifiers.
 
 ## Quick start (local)
 ```bash
-uv pip install -e . && uv run vf-eval mbpp_baseline -n 10
+uv sync  # installs deps incl. verifiers[all]
+uv run vf-install mbpp_baseline -p environments
 ```
 
 ## Minimal usage (programmatic)
@@ -37,6 +39,9 @@ from verifiers import load_environment
 env = load_environment("mbpp_baseline", dataset_split="valid", num_examples=50)
 ```
 
-## Notes
-- Single-turn env; weights: compile 0.2, tests 0.8.
-- Ensure `SANDBOX_URL` points to a running SandboxFusion server.
+## Rewards
+- **compile_reward**: 0/1 if extracted Python code runs with return code 0; else 0.
+- **tests_reward**: fractional score = passed/total from an isolated harness; falls back to 0/1 on failure to parse.
+- **format_reward**: 0/1 if the final output ends with a single fenced `python` code block; else 0.
+- **final**: \(0.2\)·compile_reward + \(0.7\)·tests_reward + \(0.1\)·format_reward.
+

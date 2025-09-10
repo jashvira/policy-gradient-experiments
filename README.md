@@ -6,7 +6,12 @@ Minimal, Verifiers-aligned workflow for MBPP with vLLM + SandboxFusion.
 - Python 3.11+, `uv`, `docker`
 - GPU + CUDA drivers for vLLM
 
-### Install environment
+### Install dependencies
+```bash
+uv sync  # installs project deps incl. verifiers[all], vLLM, etc.
+```
+
+### Install environment (editable)
 ```bash
 uv run vf-install mbpp_baseline -p environments
 ```
@@ -46,6 +51,11 @@ uv run python runs/programmatic_eval.py \
   -n 10 -r 1
 ```
 
+Alternative (CLI):
+```bash
+uv run vf-eval mbpp_baseline -b http://localhost:8000/v1 -m "$MODEL" -n 10
+```
+
 ### Inspect results
 ```bash
 uv run vf-tui
@@ -56,5 +66,8 @@ uv run vf-tui
 - Ensure MBPP JSONL splits exist under `datasets/mbpp/` (e.g., `mbpp_valid.jsonl`).
 - Ports: vLLM on 8000, SandboxFusion on 8080 (no conflict).
 - If vLLM telemetry causes permission issues, set `VLLM_NO_USAGE_STATS=1` before starting the server.
+
+- Model: ensure `.models/Qwen2.5-Coder-3B` exists (see `SETUP.md` step 5 for a one-liner download).
+- Dependencies: `uv sync` installs `verifiers[all]` so optional verifier components are available out of the box.
 
 

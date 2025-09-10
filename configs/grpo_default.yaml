@@ -1,36 +1,37 @@
 # GRPO Training Configuration
 model:
-  name: ".models/Qwen2.5-Coder-3B"
+  name: ".models/Qwen2.5-Coder-1.5B"
   env_id: "mbpp_baseline"
 
 # Training hyperparameters
 training:
   max_steps: 200
-  learning_rate: 1.0e-6
-  lr_scheduler_type: "cosine"
-  warmup_steps: 10
-  max_grad_norm: 0.001
+  learning_rate: 2.0e-5
+  lr_scheduler_type: "constant_with_warmup"
+  warmup_steps: 25
+  max_grad_norm: 0.5
   num_iterations: 1
 
 # Batch configuration
 batch:
-  per_device_train_batch_size: 8
-  num_generations: 32
-  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 32
+  num_generations: 8
+  gradient_accumulation_steps: 4
 
 # Sequence and generation lengths
 generation:
   max_seq_len: 2048
-  max_tokens: 1024
-  temperature: 1.0
-  top_p: 1.0
+  max_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
   top_k: null
+  stop: ["```"]
 
 # GRPO-specific parameters
 grpo:
   beta: 0.1
   sync_ref_model: true
-  ref_model_sync_steps: 100
+  ref_model_sync_steps: 800
   ref_model_mixup_alpha: 0.5
   loss_type: "dr_grpo"
   epsilon: 0.2
@@ -45,7 +46,7 @@ async_generation:
 # Evaluation and saving
 eval:
   strategy: "steps"
-  steps: 10
+  steps: 5
   per_device_batch_size: 512
 
 save:
