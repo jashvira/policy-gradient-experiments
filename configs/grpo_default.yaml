@@ -31,6 +31,9 @@ generation:
 grpo:
   beta: 0.1
   sync_ref_model: true
+  ref_model_sync_steps: 100
+  ref_model_mixup_alpha: 0.5
+  epsilon: 0.2
   loss_type: "dr_grpo"
   delta: null
 

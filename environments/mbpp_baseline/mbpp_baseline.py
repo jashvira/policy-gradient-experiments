@@ -73,12 +73,16 @@ def _build_rubric(parser: vf.Parser) -> vf.Rubric:
         info = kwargs.get("info", {})
         return calculate_tests_reward(completion, info)
 
+    def classic_tests_reward(parser, completion, answer, **kwargs):
+        fractional_result = tests_reward(parser, completion, answer, **kwargs)
+        return 1.0 if fractional_result == 1.0 else 0.0
+
     def format_reward(parser, completion, answer, **kwargs):
         return calculate_format_reward(completion)
 
     return vf.Rubric(
-        funcs=[compile_reward, tests_reward, format_reward],
-        weights=[0.2, 0.7, 0.1],
+        funcs=[compile_reward, tests_reward, classic_tests_reward, format_reward],
+        weights=[0.2, 0.7, 0, 0.1],
         parser=parser,
     )
 
