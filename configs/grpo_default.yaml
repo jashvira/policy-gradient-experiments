@@ -1,6 +1,6 @@
 # GRPO Training Configuration
 model:
-  name: ".models/Qwen2.5-1.5B"
+  name: ".models/Qwen2.5-3B"
   env_id: "mbpp_baseline"
 
 # Training hyperparameters
@@ -61,3 +61,7 @@ logging:
   wandb_project: "mbpp"
   wandb_entity: null
   wandb_name: null
+
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false

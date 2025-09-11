@@ -80,6 +80,12 @@ def apply_config_to_training_args(config: dict, training_args, run_name: str):
     training_args.log_completions = config['logging']['log_completions']
     training_args.report_to = config['logging']['report_to']
 
+    # Gradient checkpointing
+    if 'gradient_checkpointing' in config:
+        training_args.gradient_checkpointing = config['gradient_checkpointing']
+    if 'gradient_checkpointing_kwargs' in config and config['gradient_checkpointing_kwargs'] is not None:
+        training_args.gradient_checkpointing_kwargs = config['gradient_checkpointing_kwargs']
+
 
 def setup_environment_variables(config: dict):
     """Setup environment variables for W&B and API."""
