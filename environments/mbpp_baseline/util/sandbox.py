@@ -1,137 +1,159 @@
 """SandboxFusion integration for code execution rewards.
 
-Adds sharding (SANDBOX_URLS), connection pooling, and a small LRU cache.
+Provides sharded code execution with connection pooling.
 """
 
 import json
 import logging
 import os
 import threading
-from collections import OrderedDict
-from hashlib import sha256
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 
+# Constants
+DEFAULT_SANDBOX_URL = "http://localhost:8080"
+DEFAULT_TIMEOUT = 8
+POOL_CONNECTIONS = 128
+POOL_MAX_SIZE = 512
+ERROR_STATUS = "Error"
+
+# Response keys
+STATUS_KEY = "status"
+ERROR_KEY = "error"
+
 logger = logging.getLogger(__name__)
 
-# Parse shard URLs from env. Fallback to single SANDBOX_URL
-_env_urls = os.getenv("SANDBOX_URLS")
-if _env_urls:
-    SANDBOX_URLS: List[str] = [u.strip() for u in _env_urls.split(",") if u.strip()]
-else:
-    SANDBOX_URLS = [os.getenv("SANDBOX_URL", "http://localhost:8080").strip()]
 
-# Connection pooling: one session shared across hosts
-_session = requests.Session()
-_session.mount("http://", HTTPAdapter(pool_connections=128, pool_maxsize=512, max_retries=0))
-_session.mount("https://", HTTPAdapter(pool_connections=128, pool_maxsize=512, max_retries=0))
+class SandboxConfig:
+    """Configuration for sandbox connections."""
 
-# Round-robin index for shards
-_rr_index = 0
-_rr_lock = threading.Lock()
+    def __init__(self):
+        self.urls = self._parse_sandbox_urls()
+
+    def _parse_sandbox_urls(self) -> List[str]:
+        """Parse sandbox URLs from environment variables."""
+        env_urls = os.getenv("SANDBOX_URLS")
+        if env_urls:
+            return [url.strip() for url in env_urls.split(",") if url.strip()]
+        return [os.getenv("SANDBOX_URL", DEFAULT_SANDBOX_URL).strip()]
 
 
-def _pick_start_index() -> int:
-    global _rr_index
-    with _rr_lock:
-        idx = _rr_index
-        _rr_index = (_rr_index + 1) % len(SANDBOX_URLS)
-        return idx
+class ConnectionManager:
+    """Manages HTTP connections with pooling."""
+
+    def __init__(self):
+        self.session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=POOL_CONNECTIONS,
+            pool_maxsize=POOL_MAX_SIZE,
+            max_retries=0
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
 
-def _effective_timeout(user_timeout: int) -> float:
+class LoadBalancer:
+    """Thread-safe round-robin load balancer."""
+
+    def __init__(self, urls: List[str]):
+        self.urls = urls
+        self._index = 0
+        self._lock = threading.Lock()
+
+    def get_shard_order(self) -> List[str]:
+        """Get shards in round-robin order starting from next index."""
+        with self._lock:
+            start_idx = self._index
+            self._index = (self._index + 1) % len(self.urls)
+
+        return [self.urls[(start_idx + i) % len(self.urls)] for i in range(len(self.urls))]
+
+
+class SandboxException(Exception):
+    """Exception raised when sandbox execution fails."""
+    pass
+
+
+# Global instances
+_config = SandboxConfig()
+_connection_manager = ConnectionManager()
+_load_balancer = LoadBalancer(_config.urls)
+
+
+def _get_effective_timeout(user_timeout: int) -> float:
+    """Get effective timeout from environment or user preference."""
     try:
         return float(os.getenv("MBPP_SANDBOX_TIMEOUT", user_timeout))
-    except Exception:
+    except (ValueError, TypeError):
         return float(user_timeout)
 
 
-# Simple LRU cache (status-aware):
-# - Cache only results with status == "Success" (deterministic for same code)
-_CACHE_MAXSIZE = int(os.getenv("SANDBOX_CACHE_SIZE", "2048"))
-_cache_lock = threading.Lock()
-_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+def run_code(code: str, language: str = "python", timeout: int = DEFAULT_TIMEOUT) -> Dict[str, Any]:
+    """Execute code via SandboxFusion API with sharding.
 
+    Args:
+        code: Source code to execute
+        language: Programming language (default: python)
+        timeout: Request timeout in seconds
 
-def _cache_key(code: str, language: str) -> str:
-    return sha256(f"{language}:{code}".encode("utf-8")).hexdigest()
-
-
-def _cache_get(key: str) -> Dict[str, Any] | None:
-    with _cache_lock:
-        if key in _cache:
-            _cache.move_to_end(key)
-            return _cache[key]
-        return None
-
-
-def _cache_put(key: str, value: Dict[str, Any]) -> None:
-    with _cache_lock:
-        _cache[key] = value
-        _cache.move_to_end(key)
-        while len(_cache) > _CACHE_MAXSIZE:
-            _cache.popitem(last=False)
-
-
-def run_code(code: str, language: str = "python", timeout: int = 8) -> dict:
-    """Execute code via SandboxFusion API with sharding and caching.
+    Returns:
+        Dictionary with 'status' and either 'output' (success) or 'error' (failure)
 
     Environment overrides:
-      - SANDBOX_URLS: comma-separated list of base URLs. Example: "http://localhost:8080,http://localhost:8081"
-      - SANDBOX_URL: single base URL (fallback)
-      - MBPP_SANDBOX_TIMEOUT: float seconds to override per-request timeout
-      - SANDBOX_CACHE_SIZE: LRU cache size (default 2048)
+        SANDBOX_URLS: Comma-separated shard URLs
+        SANDBOX_URL: Single sandbox URL (fallback)
+        MBPP_SANDBOX_TIMEOUT: Override request timeout
     """
-    if not code:
-        return {"status": "Error", "error": "Empty code"}
+    if not code.strip():
+        return {STATUS_KEY: ERROR_STATUS, ERROR_KEY: "Empty code"}
 
-    key = _cache_key(code, language)
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
+    effective_timeout = _get_effective_timeout(timeout)
 
-    effective_timeout = _effective_timeout(timeout)
-
-    # Try each shard starting from round-robin index
-    start = _pick_start_index()
-    shard_order = [
-        SANDBOX_URLS[(start + i) % len(SANDBOX_URLS)] for i in range(len(SANDBOX_URLS))
-    ]
-
-    last_error: str | None = None
-    for base in shard_order:
-        url = f"{base}/run_code"
+    # Try all shards in round-robin order
+    last_error: Optional[str] = None
+    for shard_url in _load_balancer.get_shard_order():
         try:
-            response = _session.post(
-                url,
-                json={"code": code, "language": language},
-                timeout=effective_timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            # Cache only successful executions (deterministic for identical inputs)
-            if isinstance(payload, dict) and payload.get("status") == "Success":
-                _cache_put(key, payload)
-            return payload
-        except requests.exceptions.Timeout as e:
-            last_error = f"Timeout contacting {url}: {e}"
-            logger.warning(f"SandboxFusion timeout: {url} (timeout={effective_timeout})")
-            continue
-        except requests.exceptions.ConnectionError as e:
-            last_error = f"Connection error contacting {url}: {e}"
-            logger.warning(f"SandboxFusion not reachable at {base}")
-            continue
-        except requests.exceptions.RequestException as e:
-            last_error = f"Request error contacting {url}: {e}"
-            logger.error(f"SandboxFusion request error: {e}")
-            continue
-        except json.JSONDecodeError:
-            last_error = f"Invalid JSON from {url}"
-            logger.error("SandboxFusion invalid JSON response")
+            result = _execute_on_shard(shard_url, code, language, effective_timeout)
+            return result
+        except SandboxException as e:
+            last_error = str(e)
             continue
 
-    # If all shards failed, return a unified error
-    return {"status": "Error", "error": last_error or "All SandboxFusion shards failed"}
+    return {STATUS_KEY: ERROR_STATUS, ERROR_KEY: last_error or "All shards failed"}
+
+
+def _execute_on_shard(shard_url: str, code: str, language: str, timeout: float) -> Dict[str, Any]:
+    """Execute code on a specific shard."""
+    url = f"{shard_url}/run_code"
+
+    try:
+        response = _connection_manager.session.post(
+            url,
+            json={"code": code, "language": language},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except requests.exceptions.Timeout as e:
+        logger.warning(f"Sandbox timeout: {url} (timeout={timeout}s)")
+        raise SandboxException(f"Timeout: {url}")
+
+    except requests.exceptions.ConnectionError as e:
+        logger.warning(f"Sandbox unreachable: {shard_url}")
+        raise SandboxException(f"Connection failed: {shard_url}")
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Sandbox HTTP error: {e}")
+        raise SandboxException(f"HTTP error: {e}")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON from sandbox: {url}")
+        raise SandboxException(f"Invalid JSON response: {url}")
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Sandbox request error: {e}")
+        raise SandboxException(f"Request failed: {e}")
 
