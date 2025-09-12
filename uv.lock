@@ -4342,6 +4342,7 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "datasets" },
+    { name = "pytest" },
     { name = "verifiers", extra = ["all"] },
     { name = "vllm" },
     { name = "wandb" },
@@ -4357,6 +4358,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "datasets" },
+    { name = "pytest", specifier = ">=8.4.2" },
     { name = "verifiers", extras = ["all"] },
     { name = "vllm", specifier = ">=0.10.1.1" },
     { name = "wandb", specifier = ">=0.21.3" },

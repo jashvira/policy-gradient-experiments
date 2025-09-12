@@ -3,7 +3,7 @@
 
 MODEL_PATH="${MODEL_PATH:-.models/Qwen2.5-3B}"
 PORT="${PORT:-8000}"
-GPU="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}"
+GPU="${CUDA_VISIBLE_DEVICES:-0,1,2}"
 
 # Derive data-parallel size from GPU list
 IFS=',' read -r -a GPU_ARR <<< "$GPU"
