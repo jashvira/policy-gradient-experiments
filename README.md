@@ -61,13 +61,4 @@ uv run vf-eval mbpp_baseline -b http://localhost:8000/v1 -m "$MODEL" -n 10
 uv run vf-tui
 ```
 
-### Notes
-- The environment uses `environments/mbpp_baseline/mbpp_baseline.py` with a rubric that executes code remotely via SandboxFusion (`util/sandbox.py`).
-- Ensure MBPP JSONL splits exist under `datasets/mbpp/` (e.g., `mbpp_valid.jsonl`).
-- Ports: vLLM on 8000, SandboxFusion on 8080 (no conflict).
-- If vLLM telemetry causes permission issues, set `VLLM_NO_USAGE_STATS=1` before starting the server.
-
-- Model: ensure `.models/Qwen2.5-Coder-3B` exists (see `SETUP.md` step 5 for a one-liner download).
-- Dependencies: `uv sync` installs `verifiers[all]` so optional verifier components are available out of the box.
-
 

@@ -7,17 +7,26 @@ Baseline MBPP environment for verifiers with compile and tests scoring via Sandb
 
 ## Rubric and SandboxFusion
 The rubric executes code via SandboxFusion:
-- `compile_reward`: extracts the model’s Python code block, removes any `if __name__ == "__main__":` section, and executes it.
+- `compile_reward`: extracts the model's Python code block, removes any `if __name__ == "__main__":` section, and executes it.
 - `tests_reward`: builds a test harness from MBPP `test_list` and optional `test_setup_code`, then executes it.
-- Both call `mbpp_baseline.util.sandbox.run_code`, which POSTs to `SANDBOX_URL` (default `http://localhost:8080`).
+- Both call `mbpp_baseline.util.sandbox.run_code`, which POSTs to sandbox servers with load balancing and fault tolerance.
 
-Run SandboxFusion locally:
+### Single Sandbox (default)
 ```bash
 export SANDBOX_URL=http://localhost:8080
 sudo docker run -d --rm --privileged -p 8080:8080 \
   --name sandboxfusion volcengine/sandbox-fusion:server-20250609
 ```
-If unreachable, a warning is logged.
+
+### Multiple Shards (for higher throughput)
+```bash
+export SANDBOX_URLS="http://localhost:8080,http://localhost:8081,http://localhost:8082"
+sudo docker run -d --rm --privileged -p 8080:8080 --name sandbox1 volcengine/sandbox-fusion:server-20250609
+sudo docker run -d --rm --privileged -p 8081:8081 --name sandbox2 volcengine/sandbox-fusion:server-20250609
+sudo docker run -d --rm --privileged -p 8082:8082 --name sandbox3 volcengine/sandbox-fusion:server-20250609
+```
+
+The system automatically load-balances across shards and fails over if any become unreachable.
 
 ## Data
 Provide MBPP JSONL under `data_dir` or place files at a known location. Expected filenames:
