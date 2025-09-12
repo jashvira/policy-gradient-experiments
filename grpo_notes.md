@@ -8,6 +8,18 @@
 4. **GRPO compares** which answers got higher rewards
 5. **Repeat with gradient accumulation** over 8 such prompt-sets
 
+### Example
+For batch:
+  per_device_train_batch_size: 16
+  num_generations: 8
+  gradient_accumulation_steps: 8
+```
+16 problems → 128 generations → evaluate all → compute gradients
+     ↓
+Repeat 8 times (accumulate gradients)
+     ↓
+1,024 total evaluations → single weight update
+```
 ## Parameters
 - `per_device_train_batch_size=1` → 1 prompt at a time
 - `num_generations=8` → 8 completions per prompt
