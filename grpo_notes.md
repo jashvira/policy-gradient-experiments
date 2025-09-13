@@ -1,0 +1,124 @@
+# GRPO Generation & Forward Pass Mechanics
+
+## The Sequence
+
+1. **Take 1 prompt**: "Janet has 16 eggs..."
+2. **Generate 8 different answers** to that same question
+3. **Reward functions score all 8 answers**
+4. **GRPO compares** which answers got higher rewards
+5. **Repeat with gradient accumulation** over 8 such prompt-sets
+
+## Parameters
+- `per_device_train_batch_size=1` → 1 prompt at a time
+- `num_generations=8` → 8 completions per prompt
+- `gradient_accumulation_steps=8` → accumulate over 8 prompts before weight update
+
+## Memory Logic
+- "Batch size of 1" = 1 prompt processed per forward pass
+- That 1 prompt spawns 8 generations for reward comparison
+- Different from regular training where 1 sample = 1 input/output pair
+
+
+
+### Sequencing of the algorithm (current workflow: frozen reference on GPU1)
+- **Sync reference**: Copy weights `model.state_dict() → inference_model` (GPU1) at each GRPO step via `copy_model_weights()`. The `inference_model` is eval, frozen, and (optionally) compiled from initialization.
+- **Rollouts (GPU1)**: Sample `group_size` responses per prompt via HF `generate` (optional stop strings). **Note**: We avoid `output_scores=True` due to OOM issues (see below).
+- **Rewards/advantages**: Score with `r1_zero_reward_fn`; compute group-normalized advantages per prompt.
+- **Old log-probs (GPU1 → GPU0)**: Post-hoc forward pass on frozen inference model to compute per-token log-probs; move tensor to GPU0 and reuse within the step.
+- **Train (GPU0)**: Recompute current `log_probs`, compute GRPO/GRPO-Clip loss, accumulate microbatches, clip grads, then `optimizer.step()` per epoch.
+- **Validation (optional)**: Resync `inference_model` and run greedy eval.
+
+### Current vs previous workflows
+- **Current: two-GPU frozen reference (HF)**
+  - **Reference source**: Frozen `inference_model` on GPU1 (HF `generate` without `output_scores`).
+  - **Old log-probs**: Post-hoc forward pass on frozen inference model; send tensor to GPU0.
+  - **Parallelism**: GPU1 handles rollout + `old_log_probs`; GPU0 trains.
+  - **Memory**: Two models (one per GPU), small tensor transfers.
+
+- **Previous: vLLM hot-swapping (two-GPU)**
+  - **Reference source**: vLLM engine on GPU1; weights/configs were hot-swapped to stay near on-policy.
+  - **Trade-offs**: Higher operational complexity, less direct control over `generate` settings vs HF; required frequent syncing.
+  - **Reason for change**: Simplify codepath, remove hot-swapping, unify training/inference via HF while keeping two-device parallelism.
+
+### When the models start to differ within a step
+- **Identical** after sync, during rollouts, and during `old_log_probs` compute.
+- **Still identical** during microbatch backward passes (we only accumulate grads).
+- **First divergence** happens at the end of the first epoch, when `optimizer.step()` updates `model`.
+- `inference_model` remains frozen until the next GRPO step.
+
+### Impact of epochs_per_rollout_batch
+- **= 1**: r = exp(logp_cur − logp_old) ≈ 1 for the epoch (clipping won’t engage). You still update once; the model diverges only after the epoch and will be used next step.
+- **> 1**: After the first optimizer.step, `logp_cur` differs; r moves away from 1 in later epochs; clipping can engage and stabilize updates.
+
+### On-policy vs approximate on-policy
+- **On-policy**: Rollouts and `old_log_probs` come from the same snapshot used to act (the synced `inference_model`).
+- **Approximate on-policy**: Reusing the same data for multiple epochs is standard PPO/GRPO; importance ratio r and clipping control drift.
+
+### Why learning still happens when r ≈ 1
+- The gradient comes from advantages: with r ≈ 1, GRPO-Clip reduces to REINFORCE-with-baseline. Group-normalized advantages push up high-reward responses and down low-reward ones, so you still get improvement.
+
+### Memory Optimization: Post-hoc Old Log-probs
+**Problem**: Using `output_scores=True` during generation causes OOM issues:
+- HF generation with `return_dict_in_generate=True, output_scores=True` materializes T tensors of shape (batch, vocab)
+- With large models and long sequences, this accumulates massive memory (e.g., 8×512×32k×fp16 = ~256MB per sequence)
+- Peak memory becomes T × (batch × vocab × dtype_size) instead of just one logits tensor
+
+**Solution**: Post-hoc log-prob computation:
+- Generate sequences normally (no `output_scores=True`)
+- After generation, run single forward pass on frozen `inference_model` using completed sequences
+- Use `compute_log_probs_for_responses()` to get old log-probs via `get_response_log_probs()`
+- Peak memory: one (batch × seq × vocab) tensor instead of T accumulated tensors
+- Mathematically identical results, drastically reduced memory footprint
+
+
+## Batch sizes and optimiser update counts (current implementation)
+
+- **micro_train_batch_size** = `train_batch_size / gradient_accumulation_steps`
+- **updates_per_epoch** = `ceil(rollout_batch_size / train_batch_size)`
+- **microbatches_per_epoch** = `updates_per_epoch × gradient_accumulation_steps`
+- **updates_per_grpo_step** = `epochs_per_rollout_batch × updates_per_epoch`
+
+Implementation detail:
+- We step the optimiser every `gradient_accumulation_steps` microbatches.
+- The final partial group (if `rollout_batch_size` isn’t divisible) is scaled by the actual number of microbatches in that group to keep gradients correctly normalised.
+
+Interpretation of knobs:
+- **rollout_batch_size**: number of samples collected per GRPO step.
+- **train_batch_size**: target number of examples per optimiser update (controls update frequency).
+- **gradient_accumulation_steps**: splits each train-batch into microbatches to fit memory; does not change the total signal when scaling is correct.
+- **epochs_per_rollout_batch**: number of passes over the same rollouts; `> 1` yields approximate on‑policy (PPO‑style) updates within the step.
+
+Example (succinct walkthrough + pseudocode):
+- Config: `rollout_batch_size=256`, `train_batch_size=64`, `gradient_accumulation_steps=32`, `epochs_per_rollout_batch=4`.
+- Derived: `micro_train_batch_size=2`, `total_microbatches=128`, `updates_per_epoch=4`, `updates_per_grpo_step=16`.
+
+Pseudocode (matches `train_on_rollout_batch`):
+```python
+# given: R=256, B=64, G=32, E=4
+micro = B // G                 # 2
+total_micro = ceil(R / micro)  # 128
+
+for epoch in range(E):
+    zero_grad()
+    for i in range(total_micro):
+        start = i * micro; end = min(start + micro, R)
+        group_start = i - (i % G)
+        group_size = min(G, total_micro - group_start)
+
+        # policy and old-policy log-probs
+        logp = policy.forward(ids[start:end])
+        old_logp = old_policy.forward(ids[start:end])  # only for grpo_clip
+
+        # per-token GRPO(-Clip) loss → reduce over response tokens
+        per_token = grpo_clip_loss(logp, old_logp, advantages[start:end])
+        batch_loss = reduce_over_response_tokens(per_token)  # unscaled
+
+        # scale by actual accumulation group size (handles last partial group)
+        scaled = batch_loss / group_size
+        scaled.backward()
+
+        # step at group boundary or on last microbatch
+        if ((i + 1) % G == 0) or ((i + 1) == total_micro):
+            clip_grad_norm_()
+            optimizer.step(); zero_grad()
+```

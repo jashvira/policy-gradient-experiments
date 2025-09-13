@@ -1,6 +1,6 @@
 # GRPO Training Configuration
 model:
-  name: ".models/Qwen2.5-3B"
+  name: ".models/Qwen2.5-1.5B"
   env_id: "mbpp_baseline"
 
 # Training hyperparameters
@@ -10,7 +10,7 @@ training:
   lr_scheduler_type: "constant_with_warmup"
   warmup_steps: 25
   max_grad_norm: 0.5
-  num_iterations: 1
+  num_iterations: 3
 
 # Batch configuration
 batch:
@@ -29,7 +29,7 @@ generation:
 
 # GRPO-specific parameters
 grpo:
-  beta: 0.1 # This seems to too strong
+  beta: 0.01
   sync_ref_model: true
   ref_model_sync_steps: 100
   ref_model_mixup_alpha: 0.5
