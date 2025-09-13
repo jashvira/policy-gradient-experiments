@@ -12,6 +12,7 @@ dependencies = [
     "wandb>=0.21.3",
     "vllm>=0.10.1.1",
     "pytest>=8.4.2",
+    "huggingface-hub>=0.34.4",
 ]
 
 [tool.hatch.build.targets.wheel]

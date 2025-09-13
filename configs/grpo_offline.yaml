@@ -21,11 +21,10 @@ batch:
 # Sequence and generation lengths
 generation:
   max_seq_len: 2048
-  max_tokens: 512
+  max_tokens: 1024
   temperature: 0.7
   top_p: 0.9
   top_k: null
-  stop: ["```"]
 
 # GRPO-specific parameters
 grpo:
@@ -46,7 +45,7 @@ async_generation:
 # Evaluation and saving
 eval:
   strategy: "steps"
-  steps: 5
+  steps: 10
   per_device_batch_size: 512
 
 save:
