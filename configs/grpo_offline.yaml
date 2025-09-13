@@ -1,6 +1,6 @@
 # GRPO Training Configuration
 model:
-  name: ".models/Qwen2.5-1.5B"
+  name: ".models/Qwen2.5-3B"
   env_id: "mbpp_baseline"
 
 # Training hyperparameters

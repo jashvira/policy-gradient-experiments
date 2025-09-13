@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start vLLM server for MBPP evaluation
 
-MODEL_PATH="${MODEL_PATH:-.models/Qwen2.5-1.5B}"
+MODEL_PATH="${MODEL_PATH:-.models/Qwen2.5-3B}"
 PORT="${PORT:-8000}"
 GPU="${CUDA_VISIBLE_DEVICES:-0}"
 
