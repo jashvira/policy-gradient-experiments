@@ -1,14 +1,6 @@
 # GRPO Generation & Forward Pass Mechanics
 
 ## The Sequence
-
-1. **Take 1 prompt**: "Janet has 16 eggs..."
-2. **Generate 8 different answers** to that same question
-3. **Reward functions score all 8 answers**
-4. **GRPO compares** which answers got higher rewards
-5. **Repeat with gradient accumulation** over 8 such prompt-sets
-
-### Example
 For batch:
   per_device_train_batch_size: 16
   num_generations: 8
