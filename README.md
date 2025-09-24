@@ -6,6 +6,7 @@ Collection of policy gradient and reinforcement learning experiments for various
 
 | Branch | Description | Domain |
 |--------|-------------|--------|
+| [MBPP](../../tree/MBPP) | Code generation with GRPO + vLLM + SandboxFusion | MBPP coding tasks |
 | [gsm8k](../../tree/gsm8k) | Mathematical reasoning with GRPO | GSM8K dataset |
 | [math_posttrain](../../tree/math_posttrain) | Post-training experiments | MATH dataset (Hendrycks) |
 
