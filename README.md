@@ -17,8 +17,7 @@ Supervised fine-tuning after data cleanse.
 ## GRPO Results (independent from SFT)
 
 <p>
-  <img src="assets/grpo/train_raw_rewards_mean.png" alt="train/raw_rewards_mean over steps" width="320" />
-  <img src="assets/grpo/eval_accuracy.png" alt="eval/accuracy over steps" width="320" />
+  <img src="assets/grpo/rewards.png" alt="train/raw_rewards_mean over steps" width="640" />
 </p>
 
 - Model is trained with GRPO.
@@ -40,4 +39,4 @@ Supervised fine-tuning after data cleanse.
 - gradient_accumulation_steps: 32
 - n_microbatches_per_rollout_batch: 64
 - n_grpo_steps: 50
- 
+
