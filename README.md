@@ -1,3 +1,18 @@
+## Results with Qwen2.5-1.5B
+
+
+
+### Training Report
+<div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; max-width: 100%; background: #f6f8fa; border-radius: 8px; margin: 1rem 0;">
+  <iframe
+    src="https://wandb.ai/jashvira-maptek/mbpp/reports/MBPP-hill-climb-with-Qwen2-5-1-5B--VmlldzoxNDUxMTkyNg?accessToken=8d0wu7flekv2ltw3mxpb6nhx3blwaysut4e6j3958kflkc6iu58w17fgn2w6ecxc#train-rewards"
+    style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: none; border-radius: 8px;"
+    title="MBPP Training Results - Qwen2.5-1.5B">
+  </iframe>
+</div>
+
+**[Complete Results](https://api.wandb.ai/links/jashvira-maptek/5yjovjdt)**
+
 ## Quickstart
 
 Minimal, Verifiers-aligned workflow for MBPP with vLLM + SandboxFusion.
