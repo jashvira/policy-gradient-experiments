@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "MBPP"
-version = "0.1.1"
+version = "0.1.2"
 requires-python = ">=3.11"
 dependencies = ["verifiers", "datasets", "requests"]
 description = "MBPP baseline environment for Verifiers (compile + tests via SandboxFusion)."
