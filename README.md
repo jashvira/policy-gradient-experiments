@@ -1,8 +1,9 @@
 ## Results with Qwen2.5-1.5B
 
-## Training Results
 Qwen2.5-1.5B on MBPP ->
 [Interactive Experiment Dashboard](https://api.wandb.ai/links/jashvira-maptek/5yjovjdt)
+
+## RL Environment
 
 Prime Intellect Environments Hub -> [MBPP Environment](https://app.primeintellect.ai/dashboard/environments/jashvira/mbpp)
 
